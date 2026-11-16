@@ -45,10 +45,37 @@ fi
 OPTIONS_JSON=/data/options.json
 SUBS="$(jq -r '.subscriptions // [] | .[]' "${OPTIONS_JSON}" 2>/dev/null || true)"
 VPNS_N="$(jq '.vpns // [] | length' "${OPTIONS_JSON}" 2>/dev/null || echo 0)"
+PROVIDERS_DIR="${CONFIG_DIR}/providers"
+STATE="${PROVIDERS_DIR}/.state"
+mkdir -p "${PROVIDERS_DIR}"
+
+# --- Синхронизация: удаляем провайдеры, которых больше нет в настройках аддона
+if [ "$(yq '.proxy-providers // {} | length' "${CONFIG_FILE}")" -gt 0 ]; then
+    yq -i '.proxy-providers |= with_entries(select(.key | test("^(sub[0-9]+|vpns)$") | not))' "${CONFIG_FILE}"
+fi
+# кэши скачанных подписок: чистим те, чей URL изменился или кто удалён
+if [ -f "${STATE}" ]; then
+    while IFS='|' read -r name url; do
+        [ -z "${name}" ] && continue
+        keep=0
+        if [ -n "${SUBS}" ]; then
+            idx=1
+            while IFS= read -r u; do
+                if [ "sub${idx}" = "${name}" ] && [ "${u}" = "${url}" ]; then keep=1; fi
+                idx=$((idx+1))
+            done <<EOF2
+${SUBS}
+EOF2
+        fi
+        if [ "${keep}" -eq 0 ]; then
+            rm -f "${PROVIDERS_DIR}/${name}.yaml"
+        fi
+    done < "${STATE}"
+fi
+rm -f "${PROVIDERS_DIR}/vpns.yaml"
 
 if [ -n "${SUBS}" ] || [ "${VPNS_N}" -gt 0 ]; then
     bashio::log.info "Настроены подписки/VPN — настраиваю proxy-providers."
-    mkdir -p "${CONFIG_DIR}/providers"
 
     # Подписки (http-провайдеры, ядро само скачивает и обновляет)
     if [ -n "${SUBS}" ]; then
@@ -72,6 +99,8 @@ EOF
         done <<EOF2
 ${SUBS}
 EOF2
+        # запоминаем соответствие имя->URL, чтобы при изменении чистить кэш
+        jq -r '.subscriptions // [] | to_entries[] | "sub\(.key + 1)|\(.value)"' "${OPTIONS_JSON}" > "${STATE}" 2>/dev/null || true
     fi
 
     # Ручные VPN-узлы (file-провайдер, YAML/JSON определение прокси на элемент списка)
@@ -79,7 +108,7 @@ EOF2
         {
             echo "proxies:"
             jq -r '.vpns // [] | .[]' "${OPTIONS_JSON}" | sed 's/^/  /'
-        } > "${CONFIG_DIR}/providers/vpns.yaml"
+        } > "${PROVIDERS_DIR}/vpns.yaml"
         yq -i '.proxy-providers."vpns" = {"type": "file", "path": "/share/mihomo/providers/vpns.yaml", "health-check": {"enable": true, "url": "https://www.gstatic.com/generate_204", "interval": 300}}' "${CONFIG_FILE}"
         bashio::log.info "Добавлено ручных узлов (vpns): ${VPNS_N}"
     fi
@@ -102,6 +131,16 @@ EOF2
         # и правило по умолчанию
         yq -i '(.rules[] | select(. == "MATCH,DIRECT")) = "MATCH,PROXY"' "${CONFIG_FILE}"
         bashio::log.info "Группа PROXY: DIRECT убран, весь трафик идёт через VPN (AUTO — автоселект по пингу)."
+    fi
+else
+    # Подписок/VPN не осталось: снимаем наши автогруппы, возвращаем прямую маршрутизацию
+    if yq -e '.proxy-groups[]? | select(.name == "PROXY" and .include-all == true)' "${CONFIG_FILE}" >/dev/null 2>&1; then
+        yq -i '.proxy-groups |= map(select(((.name == "PROXY" and .include-all == true) or (.name == "AUTO" and .type == "url-test")) | not))'
+        yq -i '(.rules[] | select(. == "MATCH,PROXY")) = "MATCH,DIRECT"' "${CONFIG_FILE}"
+        if [ "$(yq '.proxy-groups // [] | length' "${CONFIG_FILE}")" -eq 0 ]; then
+            yq -i 'del(.proxy-groups)' "${CONFIG_FILE}"
+        fi
+        bashio::log.info "Подписки/VPN не заданы — автогруппы удалены, трафик идёт напрямую."
     fi
 fi
 
