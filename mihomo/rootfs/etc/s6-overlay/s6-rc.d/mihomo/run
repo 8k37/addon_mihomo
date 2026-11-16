@@ -115,11 +115,11 @@ EOF2
 
     # Пересоздаём автогруппы PROXY/AUTO/SPEEDTEST с нуля при каждом старте (наши —
     # с маркером include-all; пользовательские группы не трогаем). DIRECT нет: только VPN.
-    yq -i '.proxy-groups = ((.proxy-groups // []) | map(select(((.name == "PROXY" and .include-all == true) or (.name == "AUTO" and .type == "url-test") or .name == "SPEEDTEST") | not)))' "${CONFIG_FILE}"
-    yq -i '.proxy-groups = [{"name": "PROXY", "type": "select", "proxies": ["AUTO"], "include-all": true}, {"name": "AUTO", "type": "url-test", "include-all": true, "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50}, {"name": "SPEEDTEST", "type": "select", "include-all": true, "hidden": true}] + .proxy-groups' "${CONFIG_FILE}"
-    # Служебный listener для замера скорости (порт 7899 -> группа SPEEDTEST)
+    yq -i '.proxy-groups = ((.proxy-groups // []) | map(select(((.name == "PROXY" and .include-all == true) or (.name == "AUTO" and .type == "url-test") or .name == "SPEEDTEST" or .name == "FASTEST") | not)))' "${CONFIG_FILE}"
+    yq -i '.proxy-groups = [{"name": "PROXY", "type": "select", "proxies": ["AUTO"], "include-all": true}, {"name": "AUTO", "type": "url-test", "include-all": true, "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50}, {"name": "FASTEST", "type": "select", "include-all": true}] + .proxy-groups' "${CONFIG_FILE}"
+    # Служебный listener для замера скорости (порт 7899 -> группа FASTEST)
     yq -i '.listeners = ((.listeners // []) | map(select(.name != "speedtest")))' "${CONFIG_FILE}"
-    yq -i '.listeners = [{"name": "speedtest", "type": "mixed", "port": 7899, "proxy": "SPEEDTEST"}] + (.listeners // [])' "${CONFIG_FILE}"
+    yq -i '.listeners = [{"name": "speedtest", "type": "mixed", "port": 7899, "proxy": "FASTEST"}] + (.listeners // [])' "${CONFIG_FILE}"
     yq -i '(.rules[] | select(. == "MATCH,DIRECT")) = "MATCH,PROXY"' "${CONFIG_FILE}"
     if [ "$(yq '.rules // [] | length' "${CONFIG_FILE}")" -eq 0 ]; then
         yq -i '.rules = ["MATCH,PROXY"]' "${CONFIG_FILE}"
@@ -128,7 +128,7 @@ EOF2
 else
     # Подписок/VPN не осталось: снимаем наши автогруппы, возвращаем прямую маршрутизацию
     if yq -e '.proxy-groups[]? | select(.name == "PROXY" and .include-all == true)' "${CONFIG_FILE}" >/dev/null 2>&1; then
-        yq -i '.proxy-groups |= map(select(((.name == "PROXY" and .include-all == true) or (.name == "AUTO" and .type == "url-test") or .name == "SPEEDTEST") | not))'
+        yq -i '.proxy-groups |= map(select(((.name == "PROXY" and .include-all == true) or (.name == "AUTO" and .type == "url-test") or .name == "SPEEDTEST" or .name == "FASTEST") | not))'
         yq -i '.listeners = ((.listeners // []) | map(select(.name != "speedtest")))' "${CONFIG_FILE}"
         yq -i '(.rules[] | select(. == "MATCH,PROXY")) = "MATCH,DIRECT"' "${CONFIG_FILE}"
         if [ "$(yq '.proxy-groups // [] | length' "${CONFIG_FILE}")" -eq 0 ]; then
