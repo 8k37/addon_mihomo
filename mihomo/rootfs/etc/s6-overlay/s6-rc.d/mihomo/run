@@ -88,10 +88,6 @@ type: http
 url: "${url}"
 interval: 86400
 path: "./providers/${name}.yaml"
-health-check:
-  enable: true
-  url: https://www.gstatic.com/generate_204
-  interval: 300
 EOF
             yq -i ".proxy-providers.\"${name}\" = load(\"/tmp/${name}.yaml\")" "${CONFIG_FILE}"
             bashio::log.info "Подписка ${name}: ${url}"
@@ -109,7 +105,7 @@ EOF2
             echo "proxies:"
             jq -r '.vpns // [] | .[]' "${OPTIONS_JSON}" | sed 's/^/  /'
         } > "${PROVIDERS_DIR}/vpns.yaml"
-        yq -i '.proxy-providers."vpns" = {"type": "file", "path": "/share/mihomo/providers/vpns.yaml", "health-check": {"enable": true, "url": "https://www.gstatic.com/generate_204", "interval": 300}}' "${CONFIG_FILE}"
+        yq -i '.proxy-providers."vpns" = {"type": "file", "path": "/share/mihomo/providers/vpns.yaml"}' "${CONFIG_FILE}"
         bashio::log.info "Добавлено ручных узлов (vpns): ${VPNS_N}"
     fi
 
