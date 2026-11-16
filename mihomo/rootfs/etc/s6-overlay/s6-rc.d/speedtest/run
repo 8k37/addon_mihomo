@@ -3,8 +3,11 @@
 # shellcheck shell=bash
 # ==============================================================================
 # Периодический тест скорости узлов и выбор самого быстрого в группе PROXY
-# Замеры идут через отдельный listener (порт 7899) и группу SPEEDTEST,
-# поэтому основной трафик во время теста не страдает.
+#
+# Экономия времени: сначала берём из ядра узлы, прошедшие штатный пинг
+# (url-test/health-check пишет history в API), и только их проверяем на
+# скорость. Замеры идут через отдельный listener (порт 7899) и группу
+# SPEEDTEST — основной трафик во время теста не страдает.
 # ==============================================================================
 CONFIG_FILE="$(bashio::config 'config_file' '/share/mihomo/config.yaml')"
 CONFIG_DIR="$(dirname "${CONFIG_FILE}")"
@@ -13,14 +16,18 @@ MAX_NODES="$(bashio::config 'speedtest_max_nodes' '50')"
 TEST_URL="$(bashio::config 'speedtest_url' 'https://speed.cloudflare.com/__down?bytes=10000000')"
 API="http://127.0.0.1:9090"
 OFFSET_FILE="${CONFIG_DIR}/providers/.speedtest_offset"
+PING_URL_ENC="https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
 
 SECRET="$(yq '.secret // ""' "${CONFIG_FILE}" 2>/dev/null || echo "")"
-AUTH=""
 if [ -n "${SECRET}" ]; then
     AUTH=(-H "Authorization: Bearer ${SECRET}")
 else
     AUTH=()
 fi
+
+count() {
+    printf '%s\n' "$1" | grep -c . || true
+}
 
 if [ "${INTERVAL_MIN}" -le 0 ]; then
     bashio::log.info "Тест скорости отключен (speedtest_interval=0)."
@@ -30,7 +37,7 @@ INTERVAL=$((INTERVAL_MIN * 60))
 
 # Ждём готовности API (максимум ~5 минут)
 i=0
-until curl -sf "${AUTH[@]}" "${API}/version" >/dev/null 2>&1; do
+until curl -sf --max-time 5 "${AUTH[@]}" "${API}/version" >/dev/null 2>&1; do
     i=$((i + 1))
     if [ "${i}" -gt 60 ]; then
         bashio::log.warning "API mihomo недоступен — тест скорости не запущен."
@@ -39,37 +46,75 @@ until curl -sf "${AUTH[@]}" "${API}/version" >/dev/null 2>&1; do
     sleep 5
 done
 
-bashio::log.info "Служба speedtest запущена (интервал ${INTERVAL_MIN} мин, файл ${TEST_URL}). Первый замер — сразу."
+bashio::log.info "Служба speedtest запущена (интервал ${INTERVAL_MIN} мин, файл ${TEST_URL})."
 
 while true; do
-    NODES="$(curl -sf --max-time 10 "${AUTH[@]}" "${API}/proxies/SPEEDTEST" 2>/dev/null | jq -r '.all // [] | .[]' | grep -vE '^(DIRECT|REJECT)$' || true)"
-    if [ -z "${NODES}" ]; then
-        bashio::log.warning "Speedtest: нет доступных узлов для теста (группа SPEEDTEST пуста или API не ответил)."
+    ALL_NODES="$(curl -sf --max-time 10 "${AUTH[@]}" "${API}/proxies/SPEEDTEST" 2>/dev/null | jq -r '.all // [] | .[]' | grep -vE '^(DIRECT|REJECT)$' || true)"
+    if [ -z "${ALL_NODES}" ]; then
+        bashio::log.warning "Speedtest: нет доступных узлов (группа SPEEDTEST пуста или API не ответил)."
         sleep "${INTERVAL}"
         continue
     fi
-    NODES_N="$(printf '%s\n' "${NODES}" | grep -c . || true)"
+    NODES_N="$(count "${ALL_NODES}")"
 
-    # Ограничение числа узлов за цикл: окно сдвигается, чтобы постепенно
-    # тестировались все узлы даже при большой подписке
-    mapfile -t ALL_ARR <<< "${NODES}"
-    TOTAL="${#ALL_ARR[@]}"
+    # Шаг 1: узлы, прошедшие штатный пинг ядра (history в API обновляет url-test/health-check)
+    ALIVE="$(curl -sf --max-time 10 "${AUTH[@]}" "${API}/proxies" 2>/dev/null | jq -r '.proxies | to_entries[] | select((.value.history // [] | length) > 0 and (.value.history[-1].delay // 0) > 0) | .key' || true)"
+
+    if [ -n "${ALIVE}" ]; then
+        CANDIDATES="$(printf '%s\n' "${ALL_NODES}" | grep -Fxf <(printf '%s\n' "${ALIVE}") || true)"
+        CAND_N="$(count "${CANDIDATES}")"
+        if [ "${CAND_N}" -eq 0 ]; then
+            bashio::log.warning "Speedtest: из ${NODES_N} узлов ни один не отвечает на штатный пинг — пропускаю цикл."
+            sleep "${INTERVAL}"
+            continue
+        fi
+        bashio::log.info "Speedtest: живых по штатному пингу ${CAND_N} из ${NODES_N}."
+    else
+        # Шаг 1б: данных health-check нет — быстрый пинг-проход (2 сек на узел)
+        bashio::log.info "Speedtest: нет данных штатного health-check — быстрый пинг-проход..."
+        CANDIDATES=""
+        PINGED=0
+        while IFS= read -r node; do
+            [ -z "${node}" ] && continue
+            PINGED=$((PINGED + 1))
+            if [ "${MAX_NODES}" -gt 0 ] && [ "${PINGED}" -gt "${MAX_NODES}" ]; then break; fi
+            ENC="$(jq -rn --arg n "${node}" '$n | @uri')"
+            DELAY="$(curl -sf --max-time 4 "${AUTH[@]}" \
+                "${API}/proxies/${ENC}/delay?timeout=2000&url=${PING_URL_ENC}" 2>/dev/null \
+                | jq -r '.delay // 0' || echo 0)"
+            if awk "BEGIN{exit !(${DELAY:-0} > 0)}"; then
+                CANDIDATES+="${node}"$'\n'
+            fi
+        done <<< "${ALL_NODES}"
+        CAND_N="$(count "${CANDIDATES}")"
+        if [ "${CAND_N}" -eq 0 ]; then
+            bashio::log.warning "Speedtest: пинг не прошёл ни у одного из ${PINGED} проверенных узлов."
+            sleep "${INTERVAL}"
+            continue
+        fi
+        bashio::log.info "Speedtest: пинг прошли ${CAND_N} из ${PINGED} проверенных."
+    fi
+
+    # Шаг 2: окно кандидатов (ротация между циклами — постепенно проверяются все)
+    mapfile -t CAND_ARR <<< "${CANDIDATES}"
+    TOTAL="${#CAND_ARR[@]}"
     if [ "${MAX_NODES}" -gt 0 ] && [ "${TOTAL}" -gt "${MAX_NODES}" ]; then
         OFFSET="$(cat "${OFFSET_FILE}" 2>/dev/null || echo 0)"
         [ "${OFFSET}" -ge "${TOTAL}" ] && OFFSET=0
-        NODES="$(printf '%s\n' "${ALL_ARR[@]}" | sed -n "$((OFFSET + 1)),$((OFFSET + MAX_NODES))p")"
+        TO_TEST="$(printf '%s\n' "${CAND_ARR[@]}" | sed -n "$((OFFSET + 1)),$((OFFSET + MAX_NODES))p")"
         OFFSET=$(( (OFFSET + MAX_NODES) % TOTAL ))
         echo "${OFFSET}" > "${OFFSET_FILE}"
-        bashio::log.info "Speedtest: тестирую ${MAX_NODES} из ${NODES_N} узлов (окно ${OFFSET})."
+        bashio::log.info "Speedtest: тестирую скорость ${MAX_NODES} из ${TOTAL} живых (окно с ${OFFSET})."
     else
-        bashio::log.info "Speedtest: тестирую ${NODES_N} узлов..."
+        TO_TEST="${CANDIDATES}"
+        bashio::log.info "Speedtest: тестирую скорость ${TOTAL} узлов."
     fi
 
+    # Шаг 3: замер скорости только у живых узлов
     BEST=""
     BEST_SPEED=0
     while IFS= read -r node; do
         [ -z "${node}" ] && continue
-        # Переключаем служебную группу на узел и меряем скорость через порт 7899
         BODY="$(jq -n --arg n "${node}" '{name: $n}')"
         if ! curl -sf --max-time 10 -X PUT "${AUTH[@]}" \
                 -H "Content-Type: application/json" \
@@ -89,8 +134,9 @@ while true; do
             BEST="${node}"
             BEST_SPEED="${SPEED}"
         fi
-    done <<< "${NODES}"
+    done <<< "${TO_TEST}"
 
+    # Шаг 4: выбираем самый быстрый
     if [ -n "${BEST}" ]; then
         BODY="$(jq -n --arg n "${BEST}" '{name: $n}')"
         if curl -sf --max-time 10 -X PUT "${AUTH[@]}" \
