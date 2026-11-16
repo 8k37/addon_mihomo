@@ -7,8 +7,8 @@
 # Схема выбора: PROXY -> FASTEST -> AUTO -> узел
 #   1. Штатный health-check провайдеров (раз в 30 мин) держит пинг-историю узлов.
 #   2. Каждые INTERVAL мин: пинг-фильтр -> замер скорости живых (окно MAX_NODES).
-#   3. Топ-3 по скорости записывается в состав AUTO (url-test) и FASTEST,
-#      конфиг горячо перезагружается через API; AUTO выбирает быстрейшего из 3.
+#   3. Топ-10 по скорости записывается в состав AUTO (url-test) и FASTEST,
+#      конфиг горячо перезагружается через API; AUTO выбирает быстрейшего.
 #   4. Монитор каждую минуту: проверка stale-выбора AUTO (после reload из
 #      cache.db может вернуться узел вне топ-3 — сразу перевыбираем) и живости
 #      текущего узла (умер — внеочередной цикл).
@@ -120,10 +120,10 @@ fix_stale_selection() {
     fi
 }
 
-# Состояние применения топ-3 (переживает циклы в рамках работы службы)
-LAST_T3=""          # последний применённый топ-3 (JSON)
-APPLIED_BEST=""     # применённый лучший узел
-APPLIED_SPEED=0     # его скорость, Мбит/с
+# Состояние применения топ-10 (переживает циклы в рамках работы службы)
+LAST_TOP=""          # последний применённый топ (JSON)
+APPLIED_BEST=""      # применённый лучший узел
+APPLIED_SPEED=0      # его скорость, Мбит/с
 if [ -f "${CONFIG_DIR}/speedtest-results.txt" ]; then
     _line="$(grep -v '^#' "${CONFIG_DIR}/speedtest-results.txt" 2>/dev/null | head -n1 || true)"
     if [ -n "${_line}" ]; then
@@ -133,35 +133,36 @@ if [ -f "${CONFIG_DIR}/speedtest-results.txt" ]; then
     fi
 fi
 
-# Топ-3 из сырых результатов "скорость|узел" -> JSON-массив имён
-top3_of() {
-    printf '%s\n' "$1" | sort -t'|' -k1,1rn | head -n 3 | cut -d'|' -f2 \
+# Топ-10 (или меньше, если узлов меньше) из сырых результатов
+# "скорость|узел" -> JSON-массив имён
+top_of() {
+    printf '%s\n' "$1" | sort -t'|' -k1,1rn | head -n 10 | cut -d'|' -f2 \
         | jq -Rsc 'split("\n") | map(select(length > 0))'
 }
 
-# Применить топ-3: записать в конфиг, горячо перезагрузить ядро, вернуть цепочку
-apply_top3() {
-    local t3_json="$1" t3_first
-    yq -i --argjson t3 "${t3_json}" \
-        '(.proxy-groups[] | select(.name == "AUTO") | .proxies) = $t3 |
-         (.proxy-groups[] | select(.name == "FASTEST") | .proxies) = (["AUTO"] + $t3)' \
+# Применить топ: записать в конфиг, горячо перезагрузить ядро, вернуть цепочку
+apply_top() {
+    local top_json="$1" top_first
+    yq -i --argjson t "${top_json}" \
+        '(.proxy-groups[] | select(.name == "AUTO") | .proxies) = $t |
+         (.proxy-groups[] | select(.name == "FASTEST") | .proxies) = (["AUTO"] + $t)' \
         "${CONFIG_FILE}"
     if ! api -X PUT -H "Content-Type: application/json" "${API}/configs?force=true" \
             -d '{"path": ""}' >/dev/null 2>&1; then
-        bashio::log.warning "Не удалось перезагрузить конфиг — топ-3 применится при рестарте аддона."
+        bashio::log.warning "Не удалось перезагрузить конфиг — топ применится при рестарте аддона."
         return 1
     fi
-    sleep 3
+    sleep 2
     # После перезагрузки ядро восстанавливает выборы из cache.db, где AUTO может
-    # указывать на узел из старого топ-3 — задираем заново на лучший узел
-    t3_first="$(printf '%s' "${t3_json}" | jq -r '.[0]')"
-    select_group "AUTO" "${t3_first}"
+    # указывать на узел из старого топа — задираем заново на лучший узел
+    top_first="$(printf '%s' "${top_json}" | jq -r '.[0]')"
+    select_group "AUTO" "${top_first}"
     if [ "${MODE}" = "global" ]; then select_group "GLOBAL" "FASTEST"; fi
     select_group "PROXY" "FASTEST"
     select_group "FASTEST" "AUTO"
-    LAST_T3="${t3_json}"
-    APPLIED_BEST="${t3_first}"
-    bashio::log.info "Топ-3 применён, AUTO -> [${t3_first}]: $(printf '%s' "${t3_json}" | jq -r 'join(" | ")')"
+    LAST_TOP="${top_json}"
+    APPLIED_BEST="${top_first}"
+    bashio::log.info "Топ применён ($(printf '%s' "${top_json}" | jq 'length') узлов), AUTO -> [${top_first}]: $(printf '%s' "${top_json}" | jq -r 'join(" | ")')"
     return 0
 }
 
@@ -284,11 +285,11 @@ run_cycle() {
         results+="${mbps}|${node}"$'\n'
 
         # Переключение сразу: узел с пингом (живой) показал скорость выше
-        # применённого лучшего — не ждём конца цикла, применяем топ-3 сейчас
+        # применённого лучшего — не ждём конца цикла, применяем топ сейчас
         if awk "BEGIN{exit !(${mbps} > ${APPLIED_SPEED})}"; then
-            top3_now="$(top3_of "${results}")"
-            if [ -n "${top3_now}" ] && [ "${top3_now}" != "[]" ]; then
-                if apply_top3 "${top3_now}"; then
+            top_now="$(top_of "${results}")"
+            if [ -n "${top_now}" ] && [ "${top_now}" != "[]" ]; then
+                if apply_top "${top_now}"; then
                     APPLIED_SPEED="${mbps}"
                 fi
             fi
@@ -303,12 +304,12 @@ run_cycle() {
         } > "${CONFIG_DIR}/speedtest-results.txt"
     fi
 
-    # Финал цикла: если топ-3 в итоге отличается от применённого — применяем
-    # (например, 2-й и 3-й кандидаты поменялись без смены лидера)
+    # Финал цикла: если топ в итоге отличается от применённого — применяем
+    # (например, середина топа поменялась без смены лидера)
     if [ -n "${results}" ]; then
-        top3_json="$(top3_of "${results}")"
-        if [ -n "${top3_json}" ] && [ "${top3_json}" != "[]" ] && [ "${top3_json}" != "${LAST_T3}" ]; then
-            apply_top3 "${top3_json}" || true
+        top_json="$(top_of "${results}")"
+        if [ -n "${top_json}" ] && [ "${top_json}" != "[]" ] && [ "${top_json}" != "${LAST_TOP}" ]; then
+            apply_top "${top_json}" || true
         fi
     fi
     return 0
@@ -321,7 +322,7 @@ run_cycle || true
 # узла; проблема — сразу чиним/внеочередной цикл. Раз в INTERVAL — полный замер.
 LAST_CYCLE=0
 while true; do
-    sleep 60
+    sleep 30
     NOW_TS="$(date +%s)"
     if [ "$((NOW_TS - LAST_CYCLE))" -ge "${INTERVAL}" ]; then
         run_cycle || true
@@ -355,7 +356,7 @@ while true; do
     DELAY="$(node_delay "${NOW_NODE}")"
     if ! awk "BEGIN{exit !(${DELAY:-0} > 0)}"; then
         # Если совсем недавно подбор уже не нашёл живых — не спамим, ждём
-        if [ "$((NOW_TS - LAST_CYCLE))" -lt 300 ]; then
+        if [ "$((NOW_TS - LAST_CYCLE))" -lt 180 ]; then
             continue
         fi
         bashio::log.warning "Текущий узел [${NOW_NODE}] не отвечает — внеочередной подбор."
