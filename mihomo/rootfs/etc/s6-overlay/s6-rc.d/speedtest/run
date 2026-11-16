@@ -71,7 +71,7 @@ while true; do
         [ -z "${node}" ] && continue
         # Переключаем служебную группу на узел и меряем скорость через порт 7899
         BODY="$(jq -n --arg n "${node}" '{name: $n}')"
-        if ! curl -sf --max-time 10 -X PATCH "${AUTH[@]}" \
+        if ! curl -sf --max-time 10 -X PUT "${AUTH[@]}" \
                 -H "Content-Type: application/json" \
                 "${API}/proxies/SPEEDTEST" -d "${BODY}" >/dev/null 2>&1; then
             bashio::log.warning "Speedtest: не удалось выбрать узел [${node}] — пропускаю."
@@ -93,7 +93,7 @@ while true; do
 
     if [ -n "${BEST}" ]; then
         BODY="$(jq -n --arg n "${BEST}" '{name: $n}')"
-        if curl -sf --max-time 10 -X PATCH "${AUTH[@]}" \
+        if curl -sf --max-time 10 -X PUT "${AUTH[@]}" \
                 -H "Content-Type: application/json" \
                 "${API}/proxies/PROXY" -d "${BODY}" >/dev/null 2>&1; then
             MBPS="$(awk "BEGIN{printf \"%.1f\", ${BEST_SPEED} * 8 / 1000000}")"
