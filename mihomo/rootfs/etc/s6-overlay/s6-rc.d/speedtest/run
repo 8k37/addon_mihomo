@@ -4,12 +4,16 @@
 # ==============================================================================
 # Тест скорости и автоподбор самого быстрого узла.
 #
-# Схема выбора:
-#   1. Штатный пинг ядра (url-test AUTO, каждые 5 мин) отсекает мёртвые узлы.
-#   2. Скорость замеряется только у живых (окно MAX_NODES с ротацией).
-#   3. Победитель ставится в FASTEST и PROXY.
-#   4. Монитор каждую минуту пингует текущий узел: умер — внеочередной цикл.
-# Замеры идут через отдельный listener (7899) — основной трафик не страдает.
+# Схема выбора: PROXY -> FASTEST -> AUTO -> узел
+#   1. Штатный health-check провайдеров (раз в 30 мин) держит пинг-историю узлов.
+#   2. Каждые INTERVAL мин: пинг-фильтр -> замер скорости живых (окно MAX_NODES).
+#   3. Топ-3 по скорости записывается в состав AUTO (url-test) и FASTEST,
+#      конфиг горячо перезагружается через API; AUTO выбирает быстрейшего из 3.
+#   4. Монитор каждую минуту: проверка stale-выбора AUTO (после reload из
+#      cache.db может вернуться узел вне топ-3 — сразу перевыбираем) и живости
+#      текущего узла (умер — внеочередной цикл).
+# Замеры идут через скрытую группу SPEEDTEST и listener 7899 — основной
+# трафик не страдает.
 # ==============================================================================
 CONFIG_FILE="$(bashio::config 'config_file' '/share/mihomo/config.yaml')"
 CONFIG_DIR="$(dirname "${CONFIG_FILE}")"
@@ -98,9 +102,9 @@ until api "${API}/version" >/dev/null 2>&1; do
     sleep 5
 done
 
-# В глобальном режиме весь трафик идёт через встроенную группу GLOBAL —
-# направляем её на PROXY (по умолчанию там DIRECT, что оставило бы трафик без VPN)
 # Валидация кэшированных выборов и настройка глобального режима
+# (AUTO первым: FASTEST -> AUTO должен указывать на живой узел)
+fix_stale_selection "AUTO"
 fix_stale_selection "FASTEST"
 fix_stale_selection "PROXY"
 if [ "${MODE}" = "global" ]; then
@@ -212,10 +216,16 @@ run_cycle() {
                     -d '{"path": ""}' >/dev/null 2>&1; then
                 bashio::log.info "Топ-3 обновлён, конфиг перезагружен: $(printf '%s' "${top3_json}" | jq -r 'join(" | ")')"
                 sleep 3
-                # После перезагрузки возвращаем цепочку выборов
+                # После перезагрузки ядро восстанавливает выборы из cache.db, где
+                # AUTO может указывать на узел из старого топ-3 — задираем заново
+                # на лучший узел нового топ-3 (первый элемент списка)
+                local t3_first
+                t3_first="$(printf '%s' "${top3_json}" | jq -r '.[0]')"
+                select_group "AUTO" "${t3_first}"
                 if [ "${MODE}" = "global" ]; then select_group "GLOBAL" "FASTEST"; fi
                 select_group "PROXY" "FASTEST"
                 select_group "FASTEST" "AUTO"
+                bashio::log.info "AUTO -> [${t3_first}] (лучший из нового топ-3)."
             else
                 bashio::log.warning "Не удалось перезагрузить конфиг — топ-3 применится при рестарте аддона."
             fi
@@ -227,8 +237,8 @@ run_cycle() {
 # Первый цикл сразу
 run_cycle || true
 
-# Основной цикл: каждую минуту проверяем живость текущего узла FASTEST;
-# умер — внеочередной цикл подбора. Раз в INTERVAL — полный замер скорости.
+# Основной цикл: каждую минуту проверяем stale-выбор AUTO и живость текущего
+# узла; проблема — сразу чиним/внеочередной цикл. Раз в INTERVAL — полный замер.
 LAST_CYCLE=0
 while true; do
     sleep 60
@@ -241,12 +251,24 @@ while true; do
     NOW_NODE="$(api "${API}/proxies/AUTO" | jq -r '.now // ""' || true)"
     [ -z "${NOW_NODE}" ] && continue
 
-    # Контроль: закэшированный узел мог исчезнуть из подписки после её обновления
+    # Контроль: после обновления топ-3 (hot-reload) ядро могло восстановить из
+    # cache.db выбор AUTO на узел, которого уже нет в списке. Сразу чиним.
     ALL_NOW="$(api "${API}/proxies/AUTO" | jq -r '.all // [] | .[]' || true)"
     if [ -n "${ALL_NOW}" ] && ! printf '%s\n' "${ALL_NOW}" | grep -Fqx -- "${NOW_NODE}"; then
-        bashio::log.warning "FASTEST указывает на узел [${NOW_NODE}], которого нет в списке — внеочередной подбор."
-        run_cycle || true
-        LAST_CYCLE="$(date +%s)"
+        bashio::log.warning "AUTO указывает на узел [${NOW_NODE}], которого нет в списке — перевыбираю."
+        # Лучший по последнему замеру из актуального списка AUTO, иначе первый живой
+        FIX=""
+        if [ -f "${CONFIG_DIR}/speedtest-results.txt" ]; then
+            FIX="$(grep -v '^#' "${CONFIG_DIR}/speedtest-results.txt" 2>/dev/null \
+                | sed 's/^.*Мбит\/с  //' | grep -Fxf <(printf '%s\n' "${ALL_NOW}") | head -n1 || true)"
+        fi
+        if [ -z "${FIX}" ]; then
+            FIX="$(printf '%s\n' "${ALL_NOW}" | head -n1 || true)"
+        fi
+        if [ -n "${FIX}" ]; then
+            select_group "AUTO" "${FIX}"
+            bashio::log.info "AUTO -> [${FIX}]."
+        fi
         continue
     fi
 
