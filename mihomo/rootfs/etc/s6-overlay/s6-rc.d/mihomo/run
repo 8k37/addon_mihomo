@@ -84,11 +84,11 @@ EOF2
         bashio::log.info "Добавлено ручных узлов (vpns): ${VPNS_N}"
     fi
 
-    # Если групп нет — создаём группу PROXY со всеми узлами и направляем на неё трафик
+    # Если групп нет — создаём PROXY (ручной выбор) + AUTO (автовыбор по пингу)
     if [ "$(yq '.proxy-groups // [] | length' "${CONFIG_FILE}")" -eq 0 ]; then
-        yq -i '.proxy-groups = [{"name": "PROXY", "type": "select", "proxies": ["DIRECT"], "include-all": true}]' "${CONFIG_FILE}"
+        yq -i '.proxy-groups = [{"name": "PROXY", "type": "select", "proxies": ["AUTO", "DIRECT"], "include-all": true}, {"name": "AUTO", "type": "url-test", "include-all": true, "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50}]' "${CONFIG_FILE}"
         yq -i '(.rules[] | select(. == "MATCH,DIRECT")) = "MATCH,PROXY"' "${CONFIG_FILE}"
-        bashio::log.info "Создана группа PROXY (все узлы из подписок/VPN). Выбор узла — в веб-панели."
+        bashio::log.info "Созданы группы: PROXY (включая AUTO — автоселект по пингу) из всех узлов подписок/VPN."
     else
         bashio::log.info "В конфиге есть свои proxy-groups — при необходимости добавьте в них use: [sub1, sub2, vpns]."
     fi
