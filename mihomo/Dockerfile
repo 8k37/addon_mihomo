@@ -32,6 +32,7 @@ RUN set -eux; \
       armhf)   YQ_ARCH="arm" ;; \
       i386)    YQ_ARCH="386" ;; \
       amd64)   YQ_ARCH="amd64" ;; \
+      *) echo "Unsupported architecture: ${BUILD_ARCH}"; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${YQ_ARCH}" \
       -o /usr/local/bin/yq; \

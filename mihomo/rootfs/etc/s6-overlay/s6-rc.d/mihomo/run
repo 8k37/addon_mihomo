@@ -105,7 +105,7 @@ EOF2
             echo "proxies:"
             jq -r '.vpns // [] | .[]' "${OPTIONS_JSON}" | sed 's/^/  /'
         } > "${PROVIDERS_DIR}/vpns.yaml"
-        yq -i '.proxy-providers."vpns" = {"type": "file", "path": "/share/mihomo/providers/vpns.yaml"}' "${CONFIG_FILE}"
+        yq -i ".proxy-providers.\"vpns\" = {\"type\": \"file\", \"path\": \"${PROVIDERS_DIR}/vpns.yaml\"}" "${CONFIG_FILE}"
         bashio::log.info "Добавлено ручных узлов (vpns): ${VPNS_N}"
     fi
 
@@ -166,7 +166,7 @@ dns:
     - 1.1.1.1
 EOF
         DNS_HIJACK=1
-    elif grep -qE 'listen:.*1053' "${CONFIG_FILE}"; then
+    elif grep -qE 'listen:.*:1053([[:space:]]|$)' "${CONFIG_FILE}"; then
         DNS_HIJACK=1
     fi
 
@@ -189,9 +189,9 @@ EOF
     else
         bashio::log.info "LAN-интерфейс: ${LAN_IF}"
         echo "${LAN_IF}" > /run/mihomo_gw_if
-        # Наша цепочка: пересоздаём при каждом старте
+        # Наша цепочка: пересоздаём при каждом старте (не валим сервис при сбое iptables)
         iptables -t nat -N MIHOMO_GW 2>/dev/null || true
-        iptables -t nat -F MIHOMO_GW
+        iptables -t nat -F MIHOMO_GW 2>/dev/null || true
         while iptables -t nat -D PREROUTING -j MIHOMO_GW 2>/dev/null; do :; done
         while iptables -t nat -D PREROUTING -i "${LAN_IF}" -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
         while iptables -t nat -D PREROUTING -i "${LAN_IF}" -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
@@ -199,20 +199,25 @@ EOF
         # Локальные и служебные сети — напрямую, без прокси
         for net in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 \
                    172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4; do
-            iptables -t nat -A MIHOMO_GW -d "${net}" -j RETURN
+            iptables -t nat -A MIHOMO_GW -d "${net}" -j RETURN 2>/dev/null || true
         done
         # Весь остальной TCP — в mihomo (redir-port)
-        iptables -t nat -A MIHOMO_GW -p tcp -j REDIRECT --to-ports 7893
-        iptables -t nat -A PREROUTING -i "${LAN_IF}" -j MIHOMO_GW
+        iptables -t nat -A MIHOMO_GW -p tcp -j REDIRECT --to-ports 7893 2>/dev/null || true
+        iptables -t nat -A PREROUTING -i "${LAN_IF}" -j MIHOMO_GW 2>/dev/null || true
 
         if [ "${DNS_HIJACK}" -eq 1 ]; then
-            iptables -t nat -A PREROUTING -i "${LAN_IF}" -p udp --dport 53 -j REDIRECT --to-ports 1053
-            iptables -t nat -A PREROUTING -i "${LAN_IF}" -p tcp --dport 53 -j REDIRECT --to-ports 1053
+            iptables -t nat -A PREROUTING -i "${LAN_IF}" -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
+            iptables -t nat -A PREROUTING -i "${LAN_IF}" -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
             bashio::log.info "DNS-перехват включен (udp/tcp 53 -> 1053)."
         else
             bashio::log.warning "В конфиге свой блок dns без listen 1053 — DNS-перехват не включен."
         fi
-        bashio::log.info "Правила iptables применены. Укажите на клиентах шлюз и DNS = IP этого хоста."
+        # Проверка, что перехват реально активен
+        if iptables -t nat -C PREROUTING -i "${LAN_IF}" -j MIHOMO_GW 2>/dev/null; then
+            bashio::log.info "Правила iptables применены. Укажите на клиентах шлюз и DNS = IP этого хоста."
+        else
+            bashio::log.warning "Не удалось применить правила iptables — режим шлюза не работает (прокси-порты 7890/7891 продолжают работать)."
+        fi
     fi
 fi
 
