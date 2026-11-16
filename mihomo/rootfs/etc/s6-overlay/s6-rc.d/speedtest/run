@@ -18,7 +18,7 @@ MAX_NODES="$(bashio::config 'speedtest_max_nodes' '50')"
 TEST_URL="$(bashio::config 'speedtest_url' 'https://speed.cloudflare.com/__down?bytes=10000000')"
 API="http://127.0.0.1:9090"
 OFFSET_FILE="${CONFIG_DIR}/providers/.speedtest_offset"
-PING_URL_ENC="https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
+PING_URL_ENC="https%3A%2F%2F1.1.1.1.help%2F"
 
 SECRET="$(yq '.secret // ""' "${CONFIG_FILE}" 2>/dev/null || echo "")"
 if [ -n "${SECRET}" ]; then
