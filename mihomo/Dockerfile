@@ -23,6 +23,20 @@ RUN set -eux; \
     install -m 0755 /tmp/mihomo /usr/local/bin/mihomo; \
     rm -f /tmp/mihomo
 
+# yq для слияния конфигов (proxy-providers)
+ARG YQ_VERSION=v4.44.3
+RUN set -eux; \
+    case "${BUILD_ARCH}" in \
+      aarch64) YQ_ARCH="arm64" ;; \
+      armv7)   YQ_ARCH="arm" ;; \
+      armhf)   YQ_ARCH="arm" ;; \
+      i386)    YQ_ARCH="386" ;; \
+      amd64)   YQ_ARCH="amd64" ;; \
+    esac; \
+    curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${YQ_ARCH}" \
+      -o /usr/local/bin/yq; \
+    chmod +x /usr/local/bin/yq
+
 # Веб-панель metacubexd (официальный дашборд mihomo)
 RUN set -eux; \
     mkdir -p /usr/share/mihomo/ui; \

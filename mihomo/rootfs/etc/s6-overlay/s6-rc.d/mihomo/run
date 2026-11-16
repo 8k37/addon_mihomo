@@ -39,6 +39,61 @@ if grep -qE '^external-controller:.*127\.0\.0\.1' "${CONFIG_FILE}"; then
     bashio::log.warning "external-controller был привязан к 127.0.0.1 — исправлено на 0.0.0.0 (для Ingress)."
 fi
 
+# ==============================================================================
+# Подписки и ручные VPN-узлы (mihomo proxy-providers)
+# ==============================================================================
+OPTIONS_JSON=/data/options.json
+SUBS="$(jq -r '.subscriptions // [] | .[]' "${OPTIONS_JSON}" 2>/dev/null || true)"
+VPNS_N="$(jq '.vpns // [] | length' "${OPTIONS_JSON}" 2>/dev/null || echo 0)"
+
+if [ -n "${SUBS}" ] || [ "${VPNS_N}" -gt 0 ]; then
+    bashio::log.info "Настроены подписки/VPN — настраиваю proxy-providers."
+    mkdir -p "${CONFIG_DIR}/providers"
+
+    # Подписки (http-провайдеры, ядро само скачивает и обновляет)
+    if [ -n "${SUBS}" ]; then
+        idx=1
+        while IFS= read -r url; do
+            [ -z "${url}" ] && continue
+            name="sub${idx}"
+            cat > "/tmp/${name}.yaml" <<EOF
+type: http
+url: "${url}"
+interval: 86400
+path: "./providers/${name}.yaml"
+health-check:
+  enable: true
+  url: https://www.gstatic.com/generate_204
+  interval: 300
+EOF
+            yq -i ".proxy-providers.\"${name}\" = load(\"/tmp/${name}.yaml\")" "${CONFIG_FILE}"
+            bashio::log.info "Подписка ${name}: ${url}"
+            idx=$((idx+1))
+        done <<EOF2
+${SUBS}
+EOF2
+    fi
+
+    # Ручные VPN-узлы (file-провайдер, YAML/JSON определение прокси на элемент списка)
+    if [ "${VPNS_N}" -gt 0 ]; then
+        {
+            echo "proxies:"
+            jq -r '.vpns // [] | .[]' "${OPTIONS_JSON}" | sed 's/^/  /'
+        } > "${CONFIG_DIR}/providers/vpns.yaml"
+        yq -i '.proxy-providers."vpns" = {"type": "file", "path": "/share/mihomo/providers/vpns.yaml", "health-check": {"enable": true, "url": "https://www.gstatic.com/generate_204", "interval": 300}}' "${CONFIG_FILE}"
+        bashio::log.info "Добавлено ручных узлов (vpns): ${VPNS_N}"
+    fi
+
+    # Если групп нет — создаём группу PROXY со всеми узлами и направляем на неё трафик
+    if [ "$(yq '.proxy-groups // [] | length' "${CONFIG_FILE}")" -eq 0 ]; then
+        yq -i '.proxy-groups = [{"name": "PROXY", "type": "select", "proxies": ["DIRECT"], "include-all": true}]' "${CONFIG_FILE}"
+        yq -i '(.rules[] | select(. == "MATCH,DIRECT")) = "MATCH,PROXY"' "${CONFIG_FILE}"
+        bashio::log.info "Создана группа PROXY (все узлы из подписок/VPN). Выбор узла — в веб-панели."
+    else
+        bashio::log.info "В конфиге есть свои proxy-groups — при необходимости добавьте в них use: [sub1, sub2, vpns]."
+    fi
+fi
+
 bashio::log.info "Запуск mihomo с конфигом: ${CONFIG_FILE}"
 
 # ==============================================================================
