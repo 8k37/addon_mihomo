@@ -113,25 +113,15 @@ EOF2
         bashio::log.info "Добавлено ручных узлов (vpns): ${VPNS_N}"
     fi
 
-    # Если групп нет — создаём PROXY (ручной выбор) + AUTO (автовыбор по пингу).
-    # DIRECT не добавляем: весь трафик идёт только через VPN-узлы.
-    if [ "$(yq '.proxy-groups // [] | length' "${CONFIG_FILE}")" -eq 0 ]; then
-        yq -i '.proxy-groups = [{"name": "PROXY", "type": "select", "proxies": ["AUTO"], "include-all": true}, {"name": "AUTO", "type": "url-test", "include-all": true, "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50}]' "${CONFIG_FILE}"
-        yq -i '(.rules[] | select(. == "MATCH,DIRECT")) = "MATCH,PROXY"' "${CONFIG_FILE}"
-        bashio::log.info "Созданы группы: PROXY (включая AUTO — автоселект по пингу) из всех узлов подписок/VPN."
+    # Пересоздаём автогруппы PROXY/AUTO с нуля при каждом старте (наши — с маркером
+    # include-all; пользовательские группы не трогаем). DIRECT нет: только VPN.
+    yq -i '.proxy-groups = ((.proxy-groups // []) | map(select(((.name == "PROXY" and .include-all == true) or (.name == "AUTO" and .type == "url-test")) | not)))' "${CONFIG_FILE}"
+    yq -i '.proxy-groups = [{"name": "PROXY", "type": "select", "proxies": ["AUTO"], "include-all": true}, {"name": "AUTO", "type": "url-test", "include-all": true, "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50}] + .proxy-groups' "${CONFIG_FILE}"
+    yq -i '(.rules[] | select(. == "MATCH,DIRECT")) = "MATCH,PROXY"' "${CONFIG_FILE}"
+    if [ "$(yq '.rules // [] | length' "${CONFIG_FILE}")" -eq 0 ]; then
+        yq -i '.rules = ["MATCH,PROXY"]' "${CONFIG_FILE}"
     fi
-
-    # Обновляем автосозданную ранее группу PROXY (маркер include-all): убираем DIRECT,
-    # добавляем AUTO. Весь трафик — только через VPN.
-    if yq -e '.proxy-groups[]? | select(.name == "PROXY" and .include-all == true)' "${CONFIG_FILE}" >/dev/null 2>&1; then
-        yq -i '(.proxy-groups[] | select(.name == "PROXY" and .include-all == true) | .proxies) = (["AUTO"] + ((.proxies // []) | map(select(. != "DIRECT" and . != "AUTO"))))' "${CONFIG_FILE}"
-        if ! yq -e '.proxy-groups[]? | select(.name == "AUTO" and .type == "url-test")' "${CONFIG_FILE}" >/dev/null 2>&1; then
-            yq -i '.proxy-groups += [{"name": "AUTO", "type": "url-test", "include-all": true, "url": "https://www.gstatic.com/generate_204", "interval": 300, "tolerance": 50}]' "${CONFIG_FILE}"
-        fi
-        # и правило по умолчанию
-        yq -i '(.rules[] | select(. == "MATCH,DIRECT")) = "MATCH,PROXY"' "${CONFIG_FILE}"
-        bashio::log.info "Группа PROXY: DIRECT убран, весь трафик идёт через VPN (AUTO — автоселект по пингу)."
-    fi
+    bashio::log.info "Группы PROXY/AUTO пересозданы: весь трафик через VPN, AUTO — автоселект по пингу."
 else
     # Подписок/VPN не осталось: снимаем наши автогруппы, возвращаем прямую маршрутизацию
     if yq -e '.proxy-groups[]? | select(.name == "PROXY" and .include-all == true)' "${CONFIG_FILE}" >/dev/null 2>&1; then
