@@ -1,6 +1,6 @@
 # Home Assistant Add-on: Mihomo (Clash Meta)
 name: Mihomo
-version: "1.6.4"
+version: "1.7.0"
 slug: mihomo
 description: Mihomo (Clash Meta) proxy core — HTTP/SOCKS5 прокси и внешняя панель управления
 url: https://github.com/MetaCubeX/mihomo
@@ -37,6 +37,7 @@ panel_title: Mihomo
 panel_admin: true
 options:
   config_file: /share/mihomo/config.yaml
+  mode: global
   gateway_mode: false
   subscriptions: []
   vpns: []
@@ -45,6 +46,7 @@ options:
   speedtest_max_nodes: 50
 schema:
   config_file: str
+  mode: "list(global|rule|direct)"
   gateway_mode: bool
   subscriptions:
     - str

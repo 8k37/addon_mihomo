@@ -134,6 +134,14 @@ else
     fi
 fi
 
+# Режим работы (global/rule/direct) — применяем при каждом старте
+MODE="$(bashio::config 'mode' 'global')"
+if grep -q '^mode:' "${CONFIG_FILE}"; then
+    sed -i "s/^mode:.*/mode: ${MODE}/" "${CONFIG_FILE}"
+else
+    printf '\nmode: %s\n' "${MODE}" >> "${CONFIG_FILE}"
+fi
+
 bashio::log.info "Запуск mihomo с конфигом: ${CONFIG_FILE}"
 
 # ==============================================================================
