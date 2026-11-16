@@ -39,24 +39,31 @@ done
 bashio::log.info "Служба speedtest запущена (интервал ${INTERVAL_MIN} мин, файл ${TEST_URL}). Первый замер — сразу."
 
 while true; do
-    NODES="$(curl -sf "${AUTH[@]}" "${API}/proxies/SPEEDTEST" 2>/dev/null | jq -r '.all // [] | .[]' | grep -vE '^(DIRECT|REJECT)$' || true)"
+    NODES="$(curl -sf --max-time 10 "${AUTH[@]}" "${API}/proxies/SPEEDTEST" 2>/dev/null | jq -r '.all // [] | .[]' | grep -vE '^(DIRECT|REJECT)$' || true)"
     if [ -z "${NODES}" ]; then
-        bashio::log.warning "Speedtest: нет доступных узлов для теста."
+        bashio::log.warning "Speedtest: нет доступных узлов для теста (группа SPEEDTEST пуста или API не ответил)."
         sleep "${INTERVAL}"
         continue
     fi
+    NODES_N="$(printf '%s\n' "${NODES}" | grep -c . || true)"
+    bashio::log.info "Speedtest: тестирую ${NODES_N} узлов..."
 
     BEST=""
     BEST_SPEED=0
     while IFS= read -r node; do
         [ -z "${node}" ] && continue
         # Переключаем служебную группу на узел и меряем скорость через порт 7899
-        if ! curl -sf -X PATCH "${AUTH[@]}" "${API}/proxies/SPEEDTEST" \
+        if ! curl -sf --max-time 10 -X PATCH "${AUTH[@]}" "${API}/proxies/SPEEDTEST" \
                 -d "{\"name\": \"${node//\"/}\"}" >/dev/null 2>&1; then
+            bashio::log.warning "Speedtest: не удалось выбрать узел [${node}] — пропускаю."
             continue
         fi
-        SPEED="$(curl -x 'http://127.0.0.1:7899' -sS -o /dev/null --max-time 15 \
+        SPEED="$(curl -x 'http://127.0.0.1:7899' -sS -o /dev/null --connect-timeout 5 --max-time 15 \
             -w '%{speed_download}' "${TEST_URL}" 2>/dev/null || echo 0)"
+        SPEED="$(printf '%s' "${SPEED}" | tr -d '[:space:]')"
+        case "${SPEED}" in
+            ""|*[!0-9.]*) SPEED=0 ;;
+        esac
         MBPS="$(awk "BEGIN{printf \"%.1f\", ${SPEED} * 8 / 1000000}")"
         bashio::log.info "Скорость [${node}]: ${MBPS} Мбит/с"
         if awk "BEGIN{exit !(${SPEED} > ${BEST_SPEED})}"; then
