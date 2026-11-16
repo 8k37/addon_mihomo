@@ -36,14 +36,12 @@ until curl -sf "${AUTH[@]}" "${API}/version" >/dev/null 2>&1; do
     sleep 5
 done
 
-bashio::log.info "Тест скорости: интервал ${INTERVAL_MIN} мин, файл ${TEST_URL}"
+bashio::log.info "Служба speedtest запущена (интервал ${INTERVAL_MIN} мин, файл ${TEST_URL}). Первый замер — сразу."
 
 while true; do
-    sleep 30
-
     NODES="$(curl -sf "${AUTH[@]}" "${API}/proxies/SPEEDTEST" 2>/dev/null | jq -r '.all // [] | .[]' | grep -vE '^(DIRECT|REJECT)$' || true)"
     if [ -z "${NODES}" ]; then
-        bashio::log.warning "Нет доступных узлов для теста скорости."
+        bashio::log.warning "Speedtest: нет доступных узлов для теста."
         sleep "${INTERVAL}"
         continue
     fi
