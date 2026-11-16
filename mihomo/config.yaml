@@ -1,0 +1,32 @@
+# Home Assistant Add-on: Mihomo (Clash Meta)
+name: Mihomo
+version: "1.0.0"
+slug: mihomo
+description: Mihomo (Clash Meta) proxy core — HTTP/SOCKS5 прокси и внешняя панель управления
+url: https://github.com/MetaCubeX/mihomo
+arch:
+  - amd64
+  - aarch64
+  - armv7
+  - armhf
+  - i386
+init: false
+startup: services
+boot: auto
+host_network: false
+hassio_api: false
+homeassistant_api: false
+map:
+  - share:rw
+ports:
+  7890/tcp: 7890
+  7891/tcp: 7891
+  9090/tcp: 9090
+ports_description:
+  7890/tcp: HTTP/SOCKS5 (mixed) proxy port
+  7891/tcp: SOCKS5 proxy port
+  9090/tcp: External controller (API / Web UI)
+options:
+  config_file: /share/mihomo/config.yaml
+schema:
+  config_file: str
