@@ -155,6 +155,13 @@ until api "${API}/version" >/dev/null 2>&1; do
     sleep 5
 done
 
+# Прогреваем health-check провайдеров — чтобы пинг-история узлов появилась
+# сразу после старта, а не через полчаса (интервал штатной проверки 1800 с)
+for p in $(api "${API}/providers/proxies" | jq -r '.providers // {} | keys[]' | grep -vE '^(default|compatible)$' || true); do
+    p_enc="$(jq -rn --arg n "${p}" '$n | @uri')"
+    api "${API}/providers/proxies/${p_enc}/healthcheck" >/dev/null 2>&1 || true
+done
+
 # Валидация кэшированных выборов и настройка глобального режима
 # (AUTO первым: FASTEST -> AUTO должен указывать на живой узел)
 fix_stale_selection "AUTO"
@@ -186,10 +193,11 @@ run_cycle() {
         candidates="$(printf '%s\n' "${all_nodes}" | grep -Fxf <(printf '%s\n' "${alive}") || true)"
         cand_n="$(count "${candidates}")"
         if [ "${cand_n}" -eq 0 ]; then
-            bashio::log.warning "Speedtest: из ${nodes_n} узлов ни один не отвечает на штатный пинг."
-            return 1
+            bashio::log.warning "Speedtest: штатный пинг не прошёл ни у одного из ${nodes_n} — тестирую скорость напрямую."
+            candidates="${all_nodes}"
+        else
+            bashio::log.info "Speedtest: живых по штатному пингу ${cand_n} из ${nodes_n}."
         fi
-        bashio::log.info "Speedtest: живых по штатному пингу ${cand_n} из ${nodes_n}."
     else
         bashio::log.info "Speedtest: нет данных штатного health-check — быстрый пинг-проход..."
         candidates=""
@@ -205,10 +213,13 @@ run_cycle() {
         done <<< "${all_nodes}"
         cand_n="$(count "${candidates}")"
         if [ "${cand_n}" -eq 0 ]; then
-            bashio::log.warning "Speedtest: пинг не прошёл ни у одного из ${pinged} проверенных узлов."
-            return 1
+            # Пинг может врать (например, проверочный URL недоступен) — не
+            # бросаем цикл: скорость сама покажет живых (мёртвые дадут 0)
+            bashio::log.warning "Speedtest: пинг не прошёл ни у одного из ${pinged} — тестирую скорость напрямую."
+            candidates="${all_nodes}"
+        else
+            bashio::log.info "Speedtest: пинг прошли ${cand_n} из ${pinged} проверенных."
         fi
-        bashio::log.info "Speedtest: пинг прошли ${cand_n} из ${pinged} проверенных."
     fi
 
     # Окно кандидатов с ротацией между циклами
@@ -316,6 +327,10 @@ while true; do
 
     DELAY="$(node_delay "${NOW_NODE}")"
     if ! awk "BEGIN{exit !(${DELAY:-0} > 0)}"; then
+        # Если совсем недавно подбор уже не нашёл живых — не спамим, ждём
+        if [ "$((NOW_TS - LAST_CYCLE))" -lt 300 ]; then
+            continue
+        fi
         bashio::log.warning "Текущий узел [${NOW_NODE}] не отвечает — внеочередной подбор."
         run_cycle || true
         LAST_CYCLE="$(date +%s)"
