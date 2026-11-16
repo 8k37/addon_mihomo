@@ -43,7 +43,7 @@ select_group() {
 }
 
 get_nodes() {
-    api "${API}/proxies/FASTEST" | jq -r '.all // [] | .[]' | grep -vE '^(DIRECT|REJECT)$' || true
+    api "${API}/proxies/SPEEDTEST" | jq -r '.all // [] | .[]' | grep -vE '^(DIRECT|REJECT)$' || true
 }
 
 alive_list() {
@@ -171,10 +171,10 @@ run_cycle() {
         bashio::log.info "Speedtest: тестирую скорость ${total} узлов."
     fi
 
-    local best="" best_speed=0 results="" node speed mbps
+    local results="" node speed mbps
     while IFS= read -r node; do
         [ -z "${node}" ] && continue
-        if ! select_group "FASTEST" "${node}"; then
+        if ! select_group "SPEEDTEST" "${node}"; then
             bashio::log.warning "Speedtest: не удалось выбрать узел [${node}] — пропускаю."
             continue
         fi
@@ -187,12 +187,9 @@ run_cycle() {
         mbps="$(awk "BEGIN{printf \"%.1f\", ${speed} * 8 / 1000000}")"
         bashio::log.info "Скорость [${node}]: ${mbps} Мбит/с"
         results+="${mbps}|${node}"$'\n'
-        if awk "BEGIN{exit !(${speed} > ${best_speed})}"; then
-            best="${node}"
-            best_speed="${speed}"
-        fi
     done <<< "${to_test}"
 
+    # Файл результатов — доступен по Samba: \\homeassistant\share\mihomo\
     if [ -n "${results}" ]; then
         {
             echo "# Замер: $(date '+%Y-%m-%d %H:%M:%S'), узлов: $(count "${results}"), файл: ${TEST_URL}"
@@ -200,11 +197,28 @@ run_cycle() {
         } > "${CONFIG_DIR}/speedtest-results.txt"
     fi
 
-    if [ -n "${best}" ]; then
-        select_group "FASTEST" "${best}"
-        if select_group "PROXY" "${best}"; then
-            mbps="$(awk "BEGIN{printf \"%.1f\", ${best_speed} * 8 / 1000000}")"
-            bashio::log.info "Выбран самый быстрый узел: ${best} (${mbps} Мбит/с)"
+    # Топ-3 по скорости -> обновляем состав AUTO/FASTEST в конфиге и горячо
+    # перезагружаем ядро через API (без перезапуска аддона)
+    if [ -n "${results}" ]; then
+        local top3_json
+        top3_json="$(printf '%s\n' "${results}" | sort -t'|' -k1,1rn | head -n 3 | cut -d'|' -f2 \
+            | jq -Rsc 'split("\n") | map(select(length > 0))')"
+        if [ -n "${top3_json}" ] && [ "${top3_json}" != "[]" ]; then
+            yq -i --argjson t3 "${top3_json}" \
+                '(.proxy-groups[] | select(.name == "AUTO") | .proxies) = $t3 |
+                 (.proxy-groups[] | select(.name == "FASTEST") | .proxies) = (["AUTO"] + $t3)' \
+                "${CONFIG_FILE}"
+            if api -X PUT -H "Content-Type: application/json" "${API}/configs?force=true" \
+                    -d '{"path": ""}' >/dev/null 2>&1; then
+                bashio::log.info "Топ-3 обновлён, конфиг перезагружен: $(printf '%s' "${top3_json}" | jq -r 'join(" | ")')"
+                sleep 3
+                # После перезагрузки возвращаем цепочку выборов
+                if [ "${MODE}" = "global" ]; then select_group "GLOBAL" "FASTEST"; fi
+                select_group "PROXY" "FASTEST"
+                select_group "FASTEST" "AUTO"
+            else
+                bashio::log.warning "Не удалось перезагрузить конфиг — топ-3 применится при рестарте аддона."
+            fi
         fi
     fi
     return 0
@@ -224,11 +238,11 @@ while true; do
         LAST_CYCLE="$(date +%s)"
         continue
     fi
-    NOW_NODE="$(api "${API}/proxies/FASTEST" | jq -r '.now // ""' || true)"
+    NOW_NODE="$(api "${API}/proxies/AUTO" | jq -r '.now // ""' || true)"
     [ -z "${NOW_NODE}" ] && continue
 
     # Контроль: закэшированный узел мог исчезнуть из подписки после её обновления
-    ALL_NOW="$(api "${API}/proxies/FASTEST" | jq -r '.all // [] | .[]' || true)"
+    ALL_NOW="$(api "${API}/proxies/AUTO" | jq -r '.all // [] | .[]' || true)"
     if [ -n "${ALL_NOW}" ] && ! printf '%s\n' "${ALL_NOW}" | grep -Fqx -- "${NOW_NODE}"; then
         bashio::log.warning "FASTEST указывает на узел [${NOW_NODE}], которого нет в списке — внеочередной подбор."
         run_cycle || true
