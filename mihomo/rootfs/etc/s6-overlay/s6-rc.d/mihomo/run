@@ -5,6 +5,9 @@ set -e
 
 CONFIG_FILE="$(bashio::config 'config_file' '/share/mihomo/config.yaml')"
 CONFIG_DIR="$(dirname "${CONFIG_FILE}")"
+# URL проверки доступности узлов (пинг в AUTO/health-check). Проверка идёт
+# ЧЕРЕЗ узел, поэтому нужен сайт, доступный из-за рубежа: gstatic generate_204
+HC_URL="$(bashio::config 'healthcheck_url' 'https://www.gstatic.com/generate_204')"
 
 mkdir -p "${CONFIG_DIR}"
 
@@ -90,7 +93,7 @@ interval: 86400
 path: "./providers/${name}.yaml"
 health-check:
   enable: true
-  url: https://1.1.1.1.help/
+  url: "${HC_URL}"
   interval: 1800
 EOF
             yq -i ".proxy-providers.\"${name}\" = load(\"/tmp/${name}.yaml\")" "${CONFIG_FILE}"
@@ -109,14 +112,14 @@ EOF2
             echo "proxies:"
             jq -r '.vpns // [] | .[]' "${OPTIONS_JSON}" | sed 's/^/  /'
         } > "${PROVIDERS_DIR}/vpns.yaml"
-        yq -i ".proxy-providers.\"vpns\" = {\"type\": \"file\", \"path\": \"${PROVIDERS_DIR}/vpns.yaml\", \"health-check\": {\"enable\": true, \"url\": \"https://1.1.1.1.help/\", \"interval\": 1800}}" "${CONFIG_FILE}"
+        yq -i ".proxy-providers.\"vpns\" = {\"type\": \"file\", \"path\": \"${PROVIDERS_DIR}/vpns.yaml\", \"health-check\": {\"enable\": true, \"url\": \"${HC_URL}\", \"interval\": 1800}}" "${CONFIG_FILE}"
         bashio::log.info "Добавлено ручных узлов (vpns): ${VPNS_N}"
     fi
 
     # Группы: PROXY -> FASTEST -> AUTO. FASTEST/AUTO изначально включают все узлы;
     # после первого цикла speedtest AUTO сужается до топ-3 по скорости (см. speedtest/run).
     yq -i '.proxy-groups = ((.proxy-groups // []) | map(select(((.name == "PROXY" and .include-all == true) or (.name == "AUTO" and .type == "url-test") or .name == "SPEEDTEST" or .name == "FASTEST") | not)))' "${CONFIG_FILE}"
-    yq -i '.proxy-groups = [{"name": "PROXY", "type": "select", "proxies": ["FASTEST"], "include-all": true}, {"name": "AUTO", "type": "url-test", "include-all": true, "url": "https://1.1.1.1.help/", "interval": 120, "tolerance": 50, "timeout": 2000}, {"name": "FASTEST", "type": "select", "proxies": ["AUTO"], "include-all": true}, {"name": "SPEEDTEST", "type": "select", "include-all": true, "hidden": true}] + .proxy-groups' "${CONFIG_FILE}"
+    yq -i ".proxy-groups = [{\"name\": \"PROXY\", \"type\": \"select\", \"proxies\": [\"FASTEST\"], \"include-all\": true}, {\"name\": \"AUTO\", \"type\": \"url-test\", \"include-all\": true, \"url\": \"${HC_URL}\", \"interval\": 120, \"tolerance\": 50, \"timeout\": 2000}, {\"name\": \"FASTEST\", \"type\": \"select\", \"proxies\": [\"AUTO\"], \"include-all\": true}, {\"name\": \"SPEEDTEST\", \"type\": \"select\", \"include-all\": true, \"hidden\": true}] + .proxy-groups" "${CONFIG_FILE}"
     # Служебный listener для замера скорости (порт 7899 -> группа SPEEDTEST)
     yq -i '.listeners = ((.listeners // []) | map(select(.name != "speedtest")))' "${CONFIG_FILE}"
     yq -i '.listeners = [{"name": "speedtest", "type": "mixed", "port": 7899, "proxy": "SPEEDTEST"}] + (.listeners // [])' "${CONFIG_FILE}"
