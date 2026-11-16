@@ -74,7 +74,15 @@ fix_stale_selection() {
     if [ -n "${all}" ] && ! printf '%s\n' "${all}" | grep -Fqx -- "${now}"; then
         bashio::log.warning "Группа ${grp}: закэшированный узел [${now}] отсутствует в списке — перевыбираю."
         alive="$(alive_list)"
-        cand="$(printf '%s\n' "${all}" | grep -Fxf <(printf '%s\n' "${alive}") | head -n1 || true)"
+        # 1) лучший по последнему замеру, 2) первый живой, 3) просто первый
+        cand=""
+        if [ -f "${CONFIG_DIR}/speedtest-results.txt" ]; then
+            cand="$(grep -v '^#' "${CONFIG_DIR}/speedtest-results.txt" 2>/dev/null \
+                | sed 's/^.*Мбит\/с  //' | grep -Fxf <(printf '%s\n' "${all}") | head -n1 || true)"
+        fi
+        if [ -z "${cand}" ]; then
+            cand="$(printf '%s\n' "${all}" | grep -Fxf <(printf '%s\n' "${alive}") | head -n1 || true)"
+        fi
         if [ -z "${cand}" ]; then
             cand="$(printf '%s\n' "${all}" | grep -vE '^(DIRECT|REJECT)$' | head -n1 || true)"
         fi
@@ -83,6 +91,51 @@ fix_stale_selection() {
             bashio::log.info "Группа ${grp}: выбран [${cand}]."
         fi
     fi
+}
+
+# Состояние применения топ-3 (переживает циклы в рамках работы службы)
+LAST_T3=""          # последний применённый топ-3 (JSON)
+APPLIED_BEST=""     # применённый лучший узел
+APPLIED_SPEED=0     # его скорость, Мбит/с
+if [ -f "${CONFIG_DIR}/speedtest-results.txt" ]; then
+    _line="$(grep -v '^#' "${CONFIG_DIR}/speedtest-results.txt" 2>/dev/null | head -n1 || true)"
+    if [ -n "${_line}" ]; then
+        APPLIED_BEST="$(printf '%s' "${_line}" | sed 's/^.*Мбит\/с  //')"
+        APPLIED_SPEED="$(printf '%s' "${_line}" | awk '{print $1}')"
+        case "${APPLIED_SPEED}" in ""|*[!0-9.]*) APPLIED_SPEED=0 ;; esac
+    fi
+fi
+
+# Топ-3 из сырых результатов "скорость|узел" -> JSON-массив имён
+top3_of() {
+    printf '%s\n' "$1" | sort -t'|' -k1,1rn | head -n 3 | cut -d'|' -f2 \
+        | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+
+# Применить топ-3: записать в конфиг, горячо перезагрузить ядро, вернуть цепочку
+apply_top3() {
+    local t3_json="$1" t3_first
+    yq -i --argjson t3 "${t3_json}" \
+        '(.proxy-groups[] | select(.name == "AUTO") | .proxies) = $t3 |
+         (.proxy-groups[] | select(.name == "FASTEST") | .proxies) = (["AUTO"] + $t3)' \
+        "${CONFIG_FILE}"
+    if ! api -X PUT -H "Content-Type: application/json" "${API}/configs?force=true" \
+            -d '{"path": ""}' >/dev/null 2>&1; then
+        bashio::log.warning "Не удалось перезагрузить конфиг — топ-3 применится при рестарте аддона."
+        return 1
+    fi
+    sleep 3
+    # После перезагрузки ядро восстанавливает выборы из cache.db, где AUTO может
+    # указывать на узел из старого топ-3 — задираем заново на лучший узел
+    t3_first="$(printf '%s' "${t3_json}" | jq -r '.[0]')"
+    select_group "AUTO" "${t3_first}"
+    if [ "${MODE}" = "global" ]; then select_group "GLOBAL" "FASTEST"; fi
+    select_group "PROXY" "FASTEST"
+    select_group "FASTEST" "AUTO"
+    LAST_T3="${t3_json}"
+    APPLIED_BEST="${t3_first}"
+    bashio::log.info "Топ-3 применён, AUTO -> [${t3_first}]: $(printf '%s' "${t3_json}" | jq -r 'join(" | ")')"
+    return 0
 }
 
 if [ "${INTERVAL_MIN}" -le 0 ]; then
@@ -191,6 +244,17 @@ run_cycle() {
         mbps="$(awk "BEGIN{printf \"%.1f\", ${speed} * 8 / 1000000}")"
         bashio::log.info "Скорость [${node}]: ${mbps} Мбит/с"
         results+="${mbps}|${node}"$'\n'
+
+        # Переключение сразу: узел с пингом (живой) показал скорость выше
+        # применённого лучшего — не ждём конца цикла, применяем топ-3 сейчас
+        if awk "BEGIN{exit !(${mbps} > ${APPLIED_SPEED})}"; then
+            top3_now="$(top3_of "${results}")"
+            if [ -n "${top3_now}" ] && [ "${top3_now}" != "[]" ]; then
+                if apply_top3 "${top3_now}"; then
+                    APPLIED_SPEED="${mbps}"
+                fi
+            fi
+        fi
     done <<< "${to_test}"
 
     # Файл результатов — доступен по Samba: \\homeassistant\share\mihomo\
@@ -201,34 +265,12 @@ run_cycle() {
         } > "${CONFIG_DIR}/speedtest-results.txt"
     fi
 
-    # Топ-3 по скорости -> обновляем состав AUTO/FASTEST в конфиге и горячо
-    # перезагружаем ядро через API (без перезапуска аддона)
+    # Финал цикла: если топ-3 в итоге отличается от применённого — применяем
+    # (например, 2-й и 3-й кандидаты поменялись без смены лидера)
     if [ -n "${results}" ]; then
-        local top3_json
-        top3_json="$(printf '%s\n' "${results}" | sort -t'|' -k1,1rn | head -n 3 | cut -d'|' -f2 \
-            | jq -Rsc 'split("\n") | map(select(length > 0))')"
-        if [ -n "${top3_json}" ] && [ "${top3_json}" != "[]" ]; then
-            yq -i --argjson t3 "${top3_json}" \
-                '(.proxy-groups[] | select(.name == "AUTO") | .proxies) = $t3 |
-                 (.proxy-groups[] | select(.name == "FASTEST") | .proxies) = (["AUTO"] + $t3)' \
-                "${CONFIG_FILE}"
-            if api -X PUT -H "Content-Type: application/json" "${API}/configs?force=true" \
-                    -d '{"path": ""}' >/dev/null 2>&1; then
-                bashio::log.info "Топ-3 обновлён, конфиг перезагружен: $(printf '%s' "${top3_json}" | jq -r 'join(" | ")')"
-                sleep 3
-                # После перезагрузки ядро восстанавливает выборы из cache.db, где
-                # AUTO может указывать на узел из старого топ-3 — задираем заново
-                # на лучший узел нового топ-3 (первый элемент списка)
-                local t3_first
-                t3_first="$(printf '%s' "${top3_json}" | jq -r '.[0]')"
-                select_group "AUTO" "${t3_first}"
-                if [ "${MODE}" = "global" ]; then select_group "GLOBAL" "FASTEST"; fi
-                select_group "PROXY" "FASTEST"
-                select_group "FASTEST" "AUTO"
-                bashio::log.info "AUTO -> [${t3_first}] (лучший из нового топ-3)."
-            else
-                bashio::log.warning "Не удалось перезагрузить конфиг — топ-3 применится при рестарте аддона."
-            fi
+        top3_json="$(top3_of "${results}")"
+        if [ -n "${top3_json}" ] && [ "${top3_json}" != "[]" ] && [ "${top3_json}" != "${LAST_T3}" ]; then
+            apply_top3 "${top3_json}" || true
         fi
     fi
     return 0
