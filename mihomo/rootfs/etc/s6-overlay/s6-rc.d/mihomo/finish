@@ -14,6 +14,16 @@ bashio::log.info \
   "Service exited with code ${exit_code_service}" \
   "(by signal ${exit_code_signal})"
 
+# Убираем правила шлюза, чтобы хост не остался с зависшими редиректами
+if [ -f /run/mihomo_gw_if ]; then
+    LAN_IF="$(cat /run/mihomo_gw_if)"
+    iptables -t nat -D PREROUTING -i "${LAN_IF}" -j MIHOMO_GW 2>/dev/null
+    while iptables -t nat -D PREROUTING -i "${LAN_IF}" -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+    while iptables -t nat -D PREROUTING -i "${LAN_IF}" -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+fi
+iptables -t nat -F MIHOMO_GW 2>/dev/null
+iptables -t nat -X MIHOMO_GW 2>/dev/null
+
 if [[ "${exit_code_service}" -eq 256 ]]; then
   if [[ "${exit_code_container}" -eq 0 ]]; then
     echo $((128 + exit_code_signal)) > /run/s6-linux-init-container-results/exitcode

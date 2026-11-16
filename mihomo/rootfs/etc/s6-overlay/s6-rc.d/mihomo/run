@@ -40,4 +40,66 @@ if grep -qE '^external-controller:.*127\.0\.0\.1' "${CONFIG_FILE}"; then
 fi
 
 bashio::log.info "Запуск mihomo с конфигом: ${CONFIG_FILE}"
+
+# ==============================================================================
+# Режим шлюза (прозрачный прокси, REDIRECT)
+# ==============================================================================
+if bashio::config.true 'gateway_mode'; then
+    bashio::log.info "Режим шлюза включен: перехват TCP + DNS с устройств, указывающих этот хост шлюзом."
+
+    # Перехват DNS работает только если mihomo слушает DNS на 1053
+    DNS_HIJACK=0
+    if ! grep -q '^redir-port:' "${CONFIG_FILE}"; then
+        printf '\nredir-port: 7893\n' >> "${CONFIG_FILE}"
+    fi
+    if ! grep -q '^dns:' "${CONFIG_FILE}"; then
+        cat >> "${CONFIG_FILE}" <<'EOF'
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  enhanced-mode: redir-host
+  nameserver:
+    - 8.8.8.8
+    - 1.1.1.1
+EOF
+        DNS_HIJACK=1
+    elif grep -qE 'listen:.*1053' "${CONFIG_FILE}"; then
+        DNS_HIJACK=1
+    fi
+
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+    LAN_IF="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
+    if [ -z "${LAN_IF}" ]; then
+        bashio::log.warning "Не найден интерфейс по умолчанию — правила iptables не применены."
+    else
+        bashio::log.info "LAN-интерфейс: ${LAN_IF}"
+        echo "${LAN_IF}" > /run/mihomo_gw_if
+        # Наша цепочка: пересоздаём при каждом старте
+        iptables -t nat -N MIHOMO_GW 2>/dev/null || true
+        iptables -t nat -F MIHOMO_GW
+        while iptables -t nat -D PREROUTING -j MIHOMO_GW 2>/dev/null; do :; done
+        while iptables -t nat -D PREROUTING -i "${LAN_IF}" -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+        while iptables -t nat -D PREROUTING -i "${LAN_IF}" -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+
+        # Локальные и служебные сети — напрямую, без прокси
+        for net in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 \
+                   172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4; do
+            iptables -t nat -A MIHOMO_GW -d "${net}" -j RETURN
+        done
+        # Весь остальной TCP — в mihomo (redir-port)
+        iptables -t nat -A MIHOMO_GW -p tcp -j REDIRECT --to-ports 7893
+        iptables -t nat -A PREROUTING -i "${LAN_IF}" -j MIHOMO_GW
+
+        if [ "${DNS_HIJACK}" -eq 1 ]; then
+            iptables -t nat -A PREROUTING -i "${LAN_IF}" -p udp --dport 53 -j REDIRECT --to-ports 1053
+            iptables -t nat -A PREROUTING -i "${LAN_IF}" -p tcp --dport 53 -j REDIRECT --to-ports 1053
+            bashio::log.info "DNS-перехват включен (udp/tcp 53 -> 1053)."
+        else
+            bashio::log.warning "В конфиге свой блок dns без listen 1053 — DNS-перехват не включен."
+        fi
+        bashio::log.info "Правила iptables применены. Укажите на клиентах шлюз и DNS = IP этого хоста."
+    fi
+fi
+
 exec mihomo -d "${CONFIG_DIR}" -f "${CONFIG_FILE}"
