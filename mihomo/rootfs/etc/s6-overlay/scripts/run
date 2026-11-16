@@ -20,5 +20,12 @@ if ! grep -q '^external-ui:' "${CONFIG_FILE}"; then
     bashio::log.info "В конфиг добавлен external-ui. Панель: http://<ip-хоста>:9090/ui"
 fi
 
+# Контроллер обязан слушать на 0.0.0.0, иначе Ingress HA не сможет подключиться (502)
+if grep -qE '^external-controller:.*127\.0\.0\.1' "${CONFIG_FILE}"; then
+    CTRL_PORT="$(grep -E '^external-controller:' "${CONFIG_FILE}" | grep -oE '[0-9]+$')"
+    sed -i "s|^external-controller:.*|external-controller: 0.0.0.0:${CTRL_PORT:-9090}|" "${CONFIG_FILE}"
+    bashio::log.warning "external-controller был привязан к 127.0.0.1 — исправлено на 0.0.0.0 (для Ingress)."
+fi
+
 bashio::log.info "Запуск mihomo с конфигом: ${CONFIG_FILE}"
 exec mihomo -d "${CONFIG_DIR}" -f "${CONFIG_FILE}"
