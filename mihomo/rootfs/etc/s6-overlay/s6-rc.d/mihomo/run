@@ -15,9 +15,20 @@ if [ ! -f "${CONFIG_FILE}" ]; then
     bashio::log.warning "Отредактируйте ${CONFIG_FILE} (добавьте свои прокси) и перезапустите аддон."
 fi
 
-# Панель metacubexd: если в конфиге не задан external-ui — добавляем
-if ! grep -q '^external-ui:' "${CONFIG_FILE}"; then
-    printf '\nexternal-ui: /usr/share/mihomo/ui\n' >> "${CONFIG_FILE}"
+# Панель metacubexd: распаковываем в подпапку конфиг-директории
+# (mihomo разрешает external-ui только внутри home-директории)
+UI_DIR="${CONFIG_DIR}/ui"
+if [ ! -f "${UI_DIR}/index.html" ]; then
+    bashio::log.info "Устанавливаю веб-панель metacubexd в ${UI_DIR}..."
+    mkdir -p "${UI_DIR}"
+    cp -r /usr/share/mihomo/ui/. "${UI_DIR}/"
+fi
+
+# external-ui должен указывать на подпапку home-директории
+if grep -q '^external-ui:' "${CONFIG_FILE}"; then
+    sed -i 's|^external-ui:.*|external-ui: ui|' "${CONFIG_FILE}"
+else
+    printf '\nexternal-ui: ui\n' >> "${CONFIG_FILE}"
     bashio::log.info "В конфиг добавлен external-ui. Панель: http://<ip-хоста>:9090/ui"
 fi
 
