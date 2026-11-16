@@ -4,9 +4,10 @@ FROM $BUILD_FROM
 # BUILD_ARCH задаётся сборщиком Home Assistant (для Pi 5 это aarch64)
 ARG BUILD_ARCH
 ARG MIHOMO_VERSION
+ARG METACUBEXD_VERSION
 
 RUN set -eux; \
-    apk add --no-cache ca-certificates curl tzdata; \
+    apk add --no-cache ca-certificates curl tzdata tar gzip; \
     case "${BUILD_ARCH}" in \
       aarch64) MIHOMO_ARCH="arm64" ;; \
       armv7)   MIHOMO_ARCH="armv7" ;; \
@@ -21,6 +22,15 @@ RUN set -eux; \
     gunzip /tmp/mihomo.gz; \
     install -m 0755 /tmp/mihomo /usr/local/bin/mihomo; \
     rm -f /tmp/mihomo
+
+# Веб-панель metacubexd (официальный дашборд mihomo)
+RUN set -eux; \
+    mkdir -p /usr/share/mihomo/ui; \
+    curl -fsSL \
+      "https://github.com/MetaCubeX/metacubexd/releases/download/${METACUBEXD_VERSION}/compressed-dist.tgz" \
+      -o /tmp/ui.tgz; \
+    tar -xzf /tmp/ui.tgz -C /usr/share/mihomo/ui; \
+    rm -f /tmp/ui.tgz
 
 COPY rootfs /
 

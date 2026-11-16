@@ -14,5 +14,11 @@ if [ ! -f "${CONFIG_FILE}" ]; then
     bashio::log.warning "Отредактируйте ${CONFIG_FILE} (добавьте свои прокси) и перезапустите аддон."
 fi
 
+# Панель metacubexd: если в конфиге не задан external-ui — добавляем
+if ! grep -q '^external-ui:' "${CONFIG_FILE}"; then
+    printf '\nexternal-ui: /usr/share/mihomo/ui\n' >> "${CONFIG_FILE}"
+    bashio::log.info "В конфиг добавлен external-ui. Панель: http://<ip-хоста>:9090/ui"
+fi
+
 bashio::log.info "Запуск mihomo с конфигом: ${CONFIG_FILE}"
 exec mihomo -d "${CONFIG_DIR}" -f "${CONFIG_FILE}"

@@ -8,6 +8,7 @@ bind-address: "*"
 mode: rule
 log-level: info
 external-controller: 0.0.0.0:9090   # Web UI / API
+external-ui: /usr/share/mihomo/ui   # встроенная панель metacubexd: http://<ip>:9090/ui
 # secret: "password"    # пароль для панели (рекомендуется задать!)
 
 # Здесь укажите свои прокси-серверы
