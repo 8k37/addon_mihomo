@@ -51,15 +51,42 @@ get_nodes() {
 }
 
 alive_list() {
-    api "${API}/proxies" | jq -r '.proxies | to_entries[] | select((.value.history // [] | length) > 0 and (.value.history[-1].delay // 0) > 0) | .key' || true
+    # Узлы подписок НЕ отображаются в /proxies (там только группы) —
+    # источник пинг-истории: /providers/proxies
+    api "${API}/providers/proxies" | jq -r \
+        '.providers // {} | to_entries[] | .value.proxies[]? | select((.history // [] | length) > 0 and (.history[-1].delay // 0) > 0) | .name' \
+        | sort -u || true
 }
 
-# Пинг конкретного узла штатным механизмом ядра (2 сек); 0 = не отвечает
+# Пинг конкретного узла штатным механизмом ядра (5 сек); 0 = не отвечает
 node_delay() {
-    local enc delay
+    local enc delay prov p_enc
     enc="$(jq -rn --arg n "$1" '$n | @uri')"
-    delay="$(api "${API}/proxies/${enc}/delay?timeout=2000&url=${PING_URL_ENC}" | jq -r '.delay // 0' || echo 0)"
-    printf '%s' "${delay}" | tr -d '[:space:]'
+    delay="$(api "${API}/proxies/${enc}/delay?timeout=5000&url=${PING_URL_ENC}" | jq -r '.delay // 0' || echo 0)"
+    delay="$(printf '%s' "${delay}" | tr -d '[:space:]')"
+    case "${delay}" in
+        ""|*[!0-9]*) delay=0 ;;
+    esac
+    if [ "${delay}" -gt 0 ]; then
+        printf '%s' "${delay}"
+        return 0
+    fi
+    # Узел провайдера: в /proxies его нет — дёргаем одиночный healthcheck
+    # провайдера и читаем свежую пинг-историю
+    prov="$(api "${API}/providers/proxies" | jq -r --arg n "$1" \
+        '.providers // {} | to_entries[] | select(any(.value.proxies[]?; .name == $n)) | .key' \
+        | head -n1 || true)"
+    [ -z "${prov}" ] && { printf '0'; return 0; }
+    p_enc="$(jq -rn --arg p "${prov}" '$p | @uri')"
+    api "${API}/providers/proxies/${p_enc}/${enc}/healthcheck?url=${PING_URL_ENC}&timeout=5000" >/dev/null 2>&1 || true
+    delay="$(api "${API}/providers/proxies/${p_enc}" | jq -r --arg n "$1" \
+        '.proxies // [] | map(select(.name == $n)) | .[0].history // [] | if length > 0 then (.[-1].delay // 0) else 0 end' \
+        || echo 0)"
+    delay="$(printf '%s' "${delay}" | tr -d '[:space:]')"
+    case "${delay}" in
+        ""|*[!0-9]*) delay=0 ;;
+    esac
+    printf '%s' "${delay}"
 }
 
 MODE="$(bashio::config 'mode' 'global')"
