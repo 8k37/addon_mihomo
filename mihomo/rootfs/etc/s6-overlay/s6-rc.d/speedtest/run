@@ -7,9 +7,12 @@
 # поэтому основной трафик во время теста не страдает.
 # ==============================================================================
 CONFIG_FILE="$(bashio::config 'config_file' '/share/mihomo/config.yaml')"
+CONFIG_DIR="$(dirname "${CONFIG_FILE}")"
 INTERVAL_MIN="$(bashio::config 'speedtest_interval' '30')"
+MAX_NODES="$(bashio::config 'speedtest_max_nodes' '50')"
 TEST_URL="$(bashio::config 'speedtest_url' 'https://speed.cloudflare.com/__down?bytes=10000000')"
 API="http://127.0.0.1:9090"
+OFFSET_FILE="${CONFIG_DIR}/providers/.speedtest_offset"
 
 SECRET="$(yq '.secret // ""' "${CONFIG_FILE}" 2>/dev/null || echo "")"
 AUTH=""
@@ -46,15 +49,31 @@ while true; do
         continue
     fi
     NODES_N="$(printf '%s\n' "${NODES}" | grep -c . || true)"
-    bashio::log.info "Speedtest: тестирую ${NODES_N} узлов..."
+
+    # Ограничение числа узлов за цикл: окно сдвигается, чтобы постепенно
+    # тестировались все узлы даже при большой подписке
+    mapfile -t ALL_ARR <<< "${NODES}"
+    TOTAL="${#ALL_ARR[@]}"
+    if [ "${MAX_NODES}" -gt 0 ] && [ "${TOTAL}" -gt "${MAX_NODES}" ]; then
+        OFFSET="$(cat "${OFFSET_FILE}" 2>/dev/null || echo 0)"
+        [ "${OFFSET}" -ge "${TOTAL}" ] && OFFSET=0
+        NODES="$(printf '%s\n' "${ALL_ARR[@]}" | sed -n "$((OFFSET + 1)),$((OFFSET + MAX_NODES))p")"
+        OFFSET=$(( (OFFSET + MAX_NODES) % TOTAL ))
+        echo "${OFFSET}" > "${OFFSET_FILE}"
+        bashio::log.info "Speedtest: тестирую ${MAX_NODES} из ${NODES_N} узлов (окно ${OFFSET})."
+    else
+        bashio::log.info "Speedtest: тестирую ${NODES_N} узлов..."
+    fi
 
     BEST=""
     BEST_SPEED=0
     while IFS= read -r node; do
         [ -z "${node}" ] && continue
         # Переключаем служебную группу на узел и меряем скорость через порт 7899
-        if ! curl -sf --max-time 10 -X PATCH "${AUTH[@]}" "${API}/proxies/SPEEDTEST" \
-                -d "{\"name\": \"${node//\"/}\"}" >/dev/null 2>&1; then
+        BODY="$(jq -n --arg n "${node}" '{name: $n}')"
+        if ! curl -sf --max-time 10 -X PATCH "${AUTH[@]}" \
+                -H "Content-Type: application/json" \
+                "${API}/proxies/SPEEDTEST" -d "${BODY}" >/dev/null 2>&1; then
             bashio::log.warning "Speedtest: не удалось выбрать узел [${node}] — пропускаю."
             continue
         fi
@@ -73,8 +92,10 @@ while true; do
     done <<< "${NODES}"
 
     if [ -n "${BEST}" ]; then
-        if curl -sf -X PATCH "${AUTH[@]}" "${API}/proxies/PROXY" \
-                -d "{\"name\": \"${BEST//\"/}\"}" >/dev/null 2>&1; then
+        BODY="$(jq -n --arg n "${BEST}" '{name: $n}')"
+        if curl -sf --max-time 10 -X PATCH "${AUTH[@]}" \
+                -H "Content-Type: application/json" \
+                "${API}/proxies/PROXY" -d "${BODY}" >/dev/null 2>&1; then
             MBPS="$(awk "BEGIN{printf \"%.1f\", ${BEST_SPEED} * 8 / 1000000}")"
             bashio::log.info "Выбран самый быстрый узел: ${BEST} (${MBPS} Мбит/с)"
         fi
