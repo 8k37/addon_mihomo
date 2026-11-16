@@ -113,6 +113,7 @@ while true; do
     # Шаг 3: замер скорости только у живых узлов
     BEST=""
     BEST_SPEED=0
+    RESULTS=""
     while IFS= read -r node; do
         [ -z "${node}" ] && continue
         BODY="$(jq -n --arg n "${node}" '{name: $n}')"
@@ -130,11 +131,20 @@ while true; do
         esac
         MBPS="$(awk "BEGIN{printf \"%.1f\", ${SPEED} * 8 / 1000000}")"
         bashio::log.info "Скорость [${node}]: ${MBPS} Мбит/с"
+        RESULTS+="${MBPS}|${node}"$'\n'
         if awk "BEGIN{exit !(${SPEED} > ${BEST_SPEED})}"; then
             BEST="${node}"
             BEST_SPEED="${SPEED}"
         fi
     done <<< "${TO_TEST}"
+
+    # Результаты цикла — в файл, доступный по Samba: \\homeassistant\share\mihomo\
+    if [ -n "${RESULTS}" ]; then
+        {
+            echo "# Замер: $(date '+%Y-%m-%d %H:%M:%S'), узлов: $(count "${RESULTS}"), файл: ${TEST_URL}"
+            printf '%s\n' "${RESULTS}" | sort -t'|' -k1,1rn | awk -F'|' '{printf "%8.1f Мбит/с  %s\n", $1, $2}'
+        } > "${CONFIG_DIR}/speedtest-results.txt"
+    fi
 
     # Шаг 4: выбираем самый быстрый
     if [ -n "${BEST}" ]; then
