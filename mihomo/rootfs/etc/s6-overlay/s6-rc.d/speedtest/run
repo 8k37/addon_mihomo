@@ -208,33 +208,43 @@ if [ "${MODE}" = "global" ]; then
 fi
 bashio::log.info "Служба speedtest запущена (интервал ${INTERVAL_MIN} мин)."
 
-# Форс-обновление http-подписок (провайдеров) через API.
-# Ядро само обновляет их раз в сутки (и то при условии, что не рестартовали),
-# поэтому плановый цикл дёргает обновление явно — список узлов всегда свежий.
+# Обновление подписок: скачиваем, конвертируем, при изменении перезагружаем конфиг.
+# Подписки могут быть в любом формате (Clash YAML, base64, плоский список
+# vless:// и т.п.) — конвертер приводит их к узлам Clash.
 update_subscriptions() {
-    local p p_enc code url snippet n
-    for p in $(api "${API}/providers/proxies" | jq -r \
-        '.providers // {} | to_entries[] | select(.value.vehicleType == "HTTP") | .key' \
-        | sort -V || true); do
-        p_enc="$(jq -rn --arg x "${p}" '$x | @uri')"
-        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
-            -X PUT "${AUTH[@]}" "${API}/providers/proxies/${p_enc}" 2>/dev/null || echo 0)"
-        if [ "${code}" = "204" ]; then
-            bashio::log.info "Подписка ${p} обновлена."
+    local n=0 url f tmp nodes changed=0
+    while IFS= read -r url; do
+        [ -z "${url}" ] && continue
+        n=$((n + 1))
+        f="${CONFIG_DIR}/providers/sub${n}.yaml"
+        tmp="/tmp/sub${n}.new.yaml"
+        if ! /usr/local/bin/convert-sub "${url}" "${tmp}"; then
+            bashio::log.warning "Подписка sub${n}: не удалось скачать/распознать."
             continue
         fi
-        bashio::log.warning "Подписка ${p}: не удалось обновить (HTTP ${code})."
-        # Диагностика: что реально отдаёт ссылка (первые 160 символов ответа)
-        n="$(printf '%s' "${p}" | grep -oE '[0-9]+' || echo 0)"
-        url="$(jq -r ".subscriptions // [] | .[$((n - 1))] // empty" /data/options.json 2>/dev/null || true)"
-        [ -z "${url}" ] && continue
-        snippet="$(curl -sL --max-time 30 "${url}" 2>/dev/null | tr -d '\r\n\t' | head -c 160 || true)"
-        if [ -n "${snippet}" ]; then
-            bashio::log.warning "Подписка ${p}: ответ сервера: ${snippet}"
+        nodes="$(grep -c '  - name:' "${tmp}" 2>/dev/null || echo 0)"
+        if [ ! -f "${f}" ] || ! cmp -s "${tmp}" "${f}"; then
+            mv "${tmp}" "${f}"
+            changed=1
+            bashio::log.info "Подписка sub${n}: обновлена, узлов: ${nodes}."
         else
-            bashio::log.warning "Подписка ${p}: ответ пустой или ссылка недоступна."
+            rm -f "${tmp}"
+            bashio::log.info "Подписка sub${n}: без изменений (узлов: ${nodes})."
         fi
-    done
+    done <<< "$(jq -r '.subscriptions // [] | .[]' /data/options.json 2>/dev/null)"
+    if [ "${changed}" = "1" ]; then
+        if api -X PUT -H "Content-Type: application/json" "${API}/configs?force=true" \
+                -d '{"path": ""}' >/dev/null 2>&1; then
+            bashio::log.info "Конфиг перезагружен с обновлёнными подписками."
+            sleep 3
+            if [ "${MODE}" = "global" ]; then select_group "GLOBAL" "FASTEST"; fi
+            select_group "PROXY" "FASTEST"
+            select_group "FASTEST" "AUTO"
+            fix_stale_selection "AUTO"
+        else
+            bashio::log.warning "Не удалось перезагрузить конфиг — применится при рестарте."
+        fi
+    fi
 }
 
 # Полный цикл: обновление подписок -> пинг-фильтр -> замер скорости -> топ

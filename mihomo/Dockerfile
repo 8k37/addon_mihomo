@@ -49,4 +49,4 @@ RUN set -eux; \
 
 COPY rootfs /
 
-RUN chmod +x /etc/s6-overlay/s6-rc.d/mihomo/run /etc/s6-overlay/s6-rc.d/mihomo/finish /etc/s6-overlay/s6-rc.d/speedtest/run
+RUN chmod +x /etc/s6-overlay/s6-rc.d/mihomo/run /etc/s6-overlay/s6-rc.d/mihomo/finish /etc/s6-overlay/s6-rc.d/speedtest/run /usr/local/bin/convert-sub
