@@ -146,6 +146,15 @@ else
     printf '\nmode: %s\n' "${MODE}" >> "${CONFIG_FILE}"
 fi
 
+# IPv6 выключаем: аддон проксирует только IPv4, а DNS с включенным ipv6 отдаёт
+# клиентам AAAA-записи — устройства пытаются идти по IPv6 напрямую и зависают
+if grep -q '^ipv6:' "${CONFIG_FILE}"; then
+    sed -i 's/^ipv6:.*/ipv6: false/' "${CONFIG_FILE}"
+else
+    printf '\nipv6: false\n' >> "${CONFIG_FILE}"
+fi
+bashio::log.info "ipv6: false — DNS не отдаёт AAAA, клиенты используют IPv4 через прокси."
+
 bashio::log.info "Запуск mihomo с конфигом: ${CONFIG_FILE}"
 
 # В глобальном режиме весь трафик идёт через встроенную группу GLOBAL —
