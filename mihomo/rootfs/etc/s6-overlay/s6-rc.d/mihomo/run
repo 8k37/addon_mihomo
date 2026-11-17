@@ -153,6 +153,14 @@ if grep -q '^ipv6:' "${CONFIG_FILE}"; then
 else
     printf '\nipv6: false\n' >> "${CONFIG_FILE}"
 fi
+# фильтр AAAA должен быть и внутри блока dns (иначе DNS продолжает отдавать IPv6)
+if grep -q '^dns:' "${CONFIG_FILE}"; then
+    if grep -qE '^([[:space:]]+)ipv6:' "${CONFIG_FILE}"; then
+        sed -i -E 's/^([[:space:]]+)ipv6:.*/\1ipv6: false/' "${CONFIG_FILE}"
+    else
+        sed -i '/^dns:/a\  ipv6: false' "${CONFIG_FILE}"
+    fi
+fi
 bashio::log.info "ipv6: false — DNS не отдаёт AAAA, клиенты используют IPv4 через прокси."
 
 bashio::log.info "Запуск mihomo с конфигом: ${CONFIG_FILE}"
