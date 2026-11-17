@@ -212,17 +212,27 @@ bashio::log.info "Служба speedtest запущена (интервал ${IN
 # Ядро само обновляет их раз в сутки (и то при условии, что не рестартовали),
 # поэтому плановый цикл дёргает обновление явно — список узлов всегда свежий.
 update_subscriptions() {
-    local p p_enc code
+    local p p_enc code url snippet n
     for p in $(api "${API}/providers/proxies" | jq -r \
         '.providers // {} | to_entries[] | select(.value.vehicleType == "HTTP") | .key' \
-        || true); do
+        | sort -V || true); do
         p_enc="$(jq -rn --arg x "${p}" '$x | @uri')"
         code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
             -X PUT "${AUTH[@]}" "${API}/providers/proxies/${p_enc}" 2>/dev/null || echo 0)"
         if [ "${code}" = "204" ]; then
             bashio::log.info "Подписка ${p} обновлена."
+            continue
+        fi
+        bashio::log.warning "Подписка ${p}: не удалось обновить (HTTP ${code})."
+        # Диагностика: что реально отдаёт ссылка (первые 160 символов ответа)
+        n="$(printf '%s' "${p}" | grep -oE '[0-9]+' || echo 0)"
+        url="$(jq -r ".subscriptions // [] | .[$((n - 1))] // empty" /data/options.json 2>/dev/null || true)"
+        [ -z "${url}" ] && continue
+        snippet="$(curl -sL --max-time 30 "${url}" 2>/dev/null | tr -d '\r\n\t' | head -c 160 || true)"
+        if [ -n "${snippet}" ]; then
+            bashio::log.warning "Подписка ${p}: ответ сервера: ${snippet}"
         else
-            bashio::log.warning "Подписка ${p}: не удалось обновить (HTTP ${code})."
+            bashio::log.warning "Подписка ${p}: ответ пустой или ссылка недоступна."
         fi
     done
 }
