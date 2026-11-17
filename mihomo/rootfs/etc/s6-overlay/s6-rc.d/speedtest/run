@@ -145,7 +145,9 @@ apply_top() {
     local top_json="$1" top_first
     yq -i --argjson t "${top_json}" \
         '(.proxy-groups[] | select(.name == "AUTO") | .proxies) = $t |
-         (.proxy-groups[] | select(.name == "FASTEST") | .proxies) = (["AUTO"] + $t)' \
+         (.proxy-groups[] | select(.name == "AUTO") | .include-all) = false |
+         (.proxy-groups[] | select(.name == "FASTEST") | .proxies) = (["AUTO"] + $t) |
+         (.proxy-groups[] | select(.name == "FASTEST") | .include-all) = false' \
         "${CONFIG_FILE}"
     if ! api -X PUT -H "Content-Type: application/json" "${API}/configs?force=true" \
             -d '{"path": ""}' >/dev/null 2>&1; then
@@ -206,9 +208,34 @@ if [ "${MODE}" = "global" ]; then
 fi
 bashio::log.info "Служба speedtest запущена (интервал ${INTERVAL_MIN} мин)."
 
-# Полный цикл: пинг-фильтр -> замер скорости -> выбор победителя
+# Форс-обновление http-подписок (провайдеров) через API.
+# Ядро само обновляет их раз в сутки (и то при условии, что не рестартовали),
+# поэтому плановый цикл дёргает обновление явно — список узлов всегда свежий.
+update_subscriptions() {
+    local p p_enc code
+    for p in $(api "${API}/providers/proxies" | jq -r \
+        '.providers // {} | to_entries[] | select(.value.vehicleType == "HTTP") | .key' \
+        || true); do
+        p_enc="$(jq -rn --arg x "${p}" '$x | @uri')"
+        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
+            -X PUT "${AUTH[@]}" "${API}/providers/proxies/${p_enc}" 2>/dev/null || echo 0)"
+        if [ "${code}" = "204" ]; then
+            bashio::log.info "Подписка ${p} обновлена."
+        else
+            bashio::log.warning "Подписка ${p}: не удалось обновить (HTTP ${code})."
+        fi
+    done
+}
+
+# Полный цикл: обновление подписок -> пинг-фильтр -> замер скорости -> топ
+# Аргумент "scheduled" — плановый запуск (с обновлением подписок), иначе быстрый
 run_cycle() {
+    local MODE_CYCLE="${1:-quick}"
     local all_nodes nodes_n alive candidates cand_n
+    if [ "${MODE_CYCLE}" = "scheduled" ]; then
+        update_subscriptions
+        sleep 2
+    fi
     all_nodes="$(get_nodes)"
     if [ -z "${all_nodes}" ]; then
         bashio::log.warning "Speedtest: нет доступных узлов (группа FASTEST пуста или API не ответил)."
@@ -315,8 +342,8 @@ run_cycle() {
     return 0
 }
 
-# Первый цикл сразу
-run_cycle || true
+# Первый цикл сразу (с обновлением подписок)
+run_cycle scheduled || true
 
 # Основной цикл: каждую минуту проверяем stale-выбор AUTO и живость текущего
 # узла; проблема — сразу чиним/внеочередной цикл. Раз в INTERVAL — полный замер.
@@ -325,7 +352,7 @@ while true; do
     sleep 30
     NOW_TS="$(date +%s)"
     if [ "$((NOW_TS - LAST_CYCLE))" -ge "${INTERVAL}" ]; then
-        run_cycle || true
+        run_cycle scheduled || true
         LAST_CYCLE="$(date +%s)"
         continue
     fi

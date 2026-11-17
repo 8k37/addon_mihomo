@@ -89,7 +89,7 @@ if [ -n "${SUBS}" ] || [ "${VPNS_N}" -gt 0 ]; then
             cat > "/tmp/${name}.yaml" <<EOF
 type: http
 url: "${url}"
-interval: 86400
+interval: 21600
 path: "./providers/${name}.yaml"
 health-check:
   enable: true
