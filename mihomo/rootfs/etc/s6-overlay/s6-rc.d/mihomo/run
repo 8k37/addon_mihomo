@@ -91,6 +91,7 @@ type: http
 url: "${url}"
 interval: 21600
 path: "./providers/${name}.yaml"
+proxy: DIRECT
 health-check:
   enable: true
   url: "${HC_URL}"
