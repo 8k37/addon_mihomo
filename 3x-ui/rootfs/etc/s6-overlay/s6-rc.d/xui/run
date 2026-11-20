@@ -1,0 +1,11 @@
+#!/command/with-contenv sh
+set -e
+
+# Persist 3x-ui database (panel settings, users, inbounds) across restarts/rebuilds
+mkdir -p /data/x-ui
+if [ ! -e /etc/x-ui ]; then
+  ln -sfn /data/x-ui /etc/x-ui
+fi
+
+cd /app/x-ui
+exec ./x-ui
