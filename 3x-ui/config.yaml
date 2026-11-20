@@ -1,5 +1,5 @@
 name: 3x-ui
-version: "3.11.1"
+version: "3.11.0"
 slug: 3x_ui
 description: 3x-ui — панель управления Xray (Vmess, Vless, Trojan, Shadowsocks, WireGuard)
 url: https://github.com/MHSanaei/3x-ui
