@@ -37,7 +37,7 @@ panel_title: Mihomo
 panel_admin: true
 options:
   config_file: /share/mihomo/config.yaml
-  mode: global
+  mode: rule
   gateway_mode: false
   subscriptions: []
   vpns: []
