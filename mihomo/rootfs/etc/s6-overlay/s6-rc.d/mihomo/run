@@ -125,6 +125,10 @@ EOF2
     if [ "$(yq '.rules // [] | length' "${CONFIG_FILE}")" -eq 0 ]; then
         yq -i '.rules = ["MATCH,PROXY"]' "${CONFIG_FILE}"
     fi
+    # Российский трафик — всегда напрямую (правило ставим первым,
+    # дубликат при повторных запусках не создаём)
+    yq -i '.rules = (["GEOIP,RU,DIRECT,no-resolve"] + (.rules // [] | map(select(. != "GEOIP,RU,DIRECT,no-resolve"))))' "${CONFIG_FILE}"
+    bashio::log.info "Правило GEOIP,RU,DIRECT добавлено — российские ресурсы идут мимо прокси."
     bashio::log.info "Группы PROXY/AUTO пересозданы: весь трафик через VPN, AUTO — автоселект по пингу."
 else
     # Подписок/VPN не осталось: снимаем наши автогруппы, возвращаем прямую маршрутизацию
@@ -163,6 +167,11 @@ if grep -q '^dns:' "${CONFIG_FILE}"; then
     fi
 fi
 bashio::log.info "ipv6: false — DNS не отдаёт AAAA, клиенты используют IPv4 через прокси."
+
+# Правила (rules) работают только в режиме rule — в global/direct ядро их игнорирует
+if [ "${MODE}" != "rule" ]; then
+    bashio::log.warning "mode=${MODE}: правила (в т.ч. GEOIP,RU,DIRECT) не действуют. Для маршрутизации по правилам установите mode: rule в настройках аддона."
+fi
 
 bashio::log.info "Запуск mihomo с конфигом: ${CONFIG_FILE}"
 

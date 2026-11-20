@@ -23,4 +23,5 @@ proxies: []
 proxy-groups: []
 
 rules:
+  - GEOIP,RU,DIRECT,no-resolve   # российские ресурсы — мимо прокси
   - MATCH,DIRECT
